@@ -10,6 +10,8 @@ test_that("Julia engine can be set up", {
 test_that("MAP inference works on synthetic data", {
   skip_on_cran()
   
+  setup_hmm_engine()
+  
   # Small synthetic test matrix (3 individuals, 6 tests)
   test_mat <- matrix(c(
     1, 0, 1, 0, 1, 0,  # Individual 1: mixed results
@@ -38,6 +40,8 @@ test_that("MAP inference works on synthetic data", {
 test_that("MLE inference works on synthetic data", {
   skip_on_cran()
   
+  setup_hmm_engine()
+  
   # Small synthetic test matrix
   test_mat <- matrix(c(
     1, 0, 1, 0, 1, 0,
@@ -56,6 +60,8 @@ test_that("MLE inference works on synthetic data", {
 
 test_that("NUTS inference works on synthetic data", {
   skip_on_cran()
+  
+  setup_hmm_engine()
   
   # Small synthetic test matrix
   test_mat <- matrix(c(
@@ -76,6 +82,8 @@ test_that("NUTS inference works on synthetic data", {
 
 test_that("Inference handles edge cases", {
   skip_on_cran()
+  
+  setup_hmm_engine()
   
   # All negative
   test_mat_all_neg <- matrix(c(0, 0, 0, 0, 0, 0), nrow = 1, byrow = TRUE)
