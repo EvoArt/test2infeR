@@ -46,6 +46,10 @@ jobs:
         run: |
           Rscript -e 'if (!requireNamespace("rcmdcheck", quietly = TRUE)) install.packages("rcmdcheck")'
 
+      - name: Install testthat
+        run: |
+          Rscript -e 'if (!requireNamespace("testthat", quietly = TRUE)) install.packages("testthat")'
+
       - name: Install Julia packages
         run: |
           julia -e '
@@ -109,6 +113,10 @@ jobs:
       - name: Install rcmdcheck
         run: |
           Rscript -e 'if (!requireNamespace("rcmdcheck", quietly = TRUE)) install.packages("rcmdcheck")'
+
+      - name: Install testthat
+        run: |
+          Rscript -e 'if (!requireNamespace("testthat", quietly = TRUE)) install.packages("testthat")'
 
       - name: Install Julia packages
         run: |
