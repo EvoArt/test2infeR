@@ -80,4 +80,3 @@ The Julia engine uses the same HMM implementation as the RData2 model:
 - The package automatically handles Julia installation via JuliaCall
 - First run will download Julia and install dependencies (may take several minutes)
 - Subsequent runs will reuse the cached Julia installation
-- No data files are included in the package - users must provide their own test matrices
