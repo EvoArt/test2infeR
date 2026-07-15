@@ -65,6 +65,7 @@ jobs:
               "LogExpFunctions",
               "ProgressMeter",
               "StaticArrays",
+              "Suppressor",
               "Turing"
             ])
           '
@@ -133,6 +134,7 @@ jobs:
               "LogExpFunctions",
               "ProgressMeter",
               "StaticArrays",
+              "Suppressor",
               "Turing"
             ])
           '
