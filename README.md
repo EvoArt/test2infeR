@@ -27,8 +27,12 @@ test_mat <- matrix(c(
   1, 1, 1, 1, 1, 1   # Individual 3: all positive
 ), nrow = 3, byrow = TRUE)
 
+# Optional: Create covariate matrix (individuals x covariates)
+# Empty matrix for no covariates
+covariates <- matrix(nrow = nrow(test_mat), ncol = 0)
+
 # Run inference
-result <- hmm_inference(test_mat, method = "map")
+result <- hmm_inference(test_mat, covariates, method = "map")
 
 # View individual-level results
 print(result$individual)
@@ -67,10 +71,9 @@ Returns a list with three data frames:
 
 ## Implementation
 
-The Julia engine uses the same HMM implementation as the RData2 model:
-- 2-state HMM (Uninfected → Infected, absorbing)
+The Julia engine uses a 2-state HMM (Uninfected → Infected, absorbing):
 - Seasonal and year effects on transition probabilities
-- Optional sex effect
+- Generic covariate effects (any number of covariates supported)
 - Test-specific sensitivity and specificity with weakly informative priors
 - Forward-backward smoothing for individual-level posterior probabilities
 - NUTS initialized from MAP to avoid label switching

@@ -1,15 +1,16 @@
 #' Run HMM inference on diagnostic test data
 #'
-#' @param test_mat Test matrix (individuals x time points x tests) or data frame
+#' @param test_mat Test matrix (individuals x tests)
+#' @param covariates Covariate matrix (individuals x covariates), can be empty matrix
 #' @param method Inference method: "nuts", "map", or "mle"
-#' @param with_sex Include sex effect (logical)
 #' @param nuts_samples Number of NUTS samples (for method="nuts")
 #' @param target_acc Target acceptance rate for NUTS
 #' @param seed Random seed
 #' @return List with individual infection probabilities and prevalence over time
 #' @export
-hmm_inference <- function(test_mat, method = c("nuts", "map", "mle"),
-                         with_sex = FALSE, nuts_samples = 1000,
+hmm_inference <- function(test_mat, covariates = matrix(nrow = nrow(test_mat), ncol = 0),
+                         method = c("nuts", "map", "mle"),
+                         nuts_samples = 1000,
                          target_acc = 0.65, seed = 123) {
   method <- match.arg(method)
   ensure_engine()
@@ -24,15 +25,18 @@ hmm_inference <- function(test_mat, method = c("nuts", "map", "mle"),
   JuliaCall::julia_assign("r_test_mat", test_mat)
   JuliaCall::julia_command("j_test_mat = Matrix{Float64}(r_test_mat)")
   
+  # Convert covariates to Julia array
+  JuliaCall::julia_assign("r_covariates", covariates)
+  JuliaCall::julia_command("j_covariates = Matrix{Float64}(r_covariates)")
+  
   # Set parameters
-  JuliaCall::julia_assign("j_with_sex", with_sex)
   JuliaCall::julia_assign("j_nuts_samples", as.integer(nuts_samples))
   JuliaCall::julia_assign("j_target_acc", as.numeric(target_acc))
   JuliaCall::julia_assign("j_seed", as.integer(seed))
   JuliaCall::julia_assign("j_method", method)
   
   # Call Julia inference function
-  JuliaCall::julia_command("result = run_hmm_inference(j_test_mat, j_method, j_with_sex, j_nuts_samples, j_target_acc, j_seed)")
+  JuliaCall::julia_command("result = run_hmm_inference(j_test_mat, j_covariates, j_method, j_nuts_samples, j_target_acc, j_seed)")
   
   # Extract individual-level results
   p_inf_last <- JuliaCall::julia_eval("result.p_inf_last")
