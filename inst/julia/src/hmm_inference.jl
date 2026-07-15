@@ -117,7 +117,7 @@ sp_priors = beta_from_moments.(SP_PRIOR_MEANS, SP_PRIOR_STDS)
     if n_covariates > 0
         beta ~ MvNormal(zeros(n_covariates), I(n_covariates))
     else
-        beta = zeros(0)
+        beta = Float64[]
     end
 
     Se ~ arraydist(se_priors)
