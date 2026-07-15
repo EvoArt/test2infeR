@@ -1,0 +1,118 @@
+name: Test test2infeR
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        r: ['release']
+        julia: ['1.10', '1.11']
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        exclude:
+          # Exclude some combinations to reduce CI load
+          - os: macos-latest
+            julia: '1.11'
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.r }}
+          use-public-rspm: true
+
+      - name: Install Julia dependencies
+        shell: Rscript
+        run: |
+          if (!requireNamespace("JuliaCall", quietly = TRUE)) {
+            install.packages("JuliaCall")
+          }
+
+      - name: Instantiate Julia environment
+        run: |
+          julia --project=inst/julia -e '
+            using Pkg
+            Pkg.instantiate()
+            Pkg.precompile()
+          '
+
+      - name: Run R CMD check
+        uses: r-lib/actions/check-r-package@v2
+        with:
+          upload-snapshots: true
+
+      - name: Show testthat output
+        if: always()
+        run: |
+          find ./check -name 'testthat*.log' -exec cat '{}' \; || true
+        shell: bash
+
+  test-nightly:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        r: ['release']
+        julia: ['nightly']
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.r }}
+          use-public-rspm: true
+
+      - name: Install Julia dependencies
+        shell: Rscript
+        run: |
+          if (!requireNamespace("JuliaCall", quietly = TRUE)) {
+            install.packages("JuliaCall")
+          }
+
+      - name: Instantiate Julia environment
+        run: |
+          julia --project=inst/julia -e '
+            using Pkg
+            Pkg.instantiate()
+            Pkg.precompile()
+          '
+
+      - name: Run R CMD check
+        uses: r-lib/actions/check-r-package@v2
+        with:
+          upload-snapshots: true
+        continue-on-error: true
+
+      - name: Show testthat output
+        if: always()
+        run: |
+          find ./check -name 'testthat*.log' -exec cat '{}' \; || true
+        shell: bash
