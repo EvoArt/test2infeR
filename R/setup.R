@@ -6,6 +6,17 @@
 .hmm_state$engine_loaded <- FALSE
 .hmm_state$src_dir <- NULL
 
+#' @keywords internal
+.onLoad <- function(libname, pkgname) {
+  # Automatically set up Julia engine on package load
+  tryCatch({
+    setup_hmm_engine(install_julia = FALSE)
+  }, error = function(e) {
+    # Silent fail - user can call setup_hmm_engine() manually if needed
+    warning("Julia engine setup failed on package load. Call setup_hmm_engine() manually.")
+  })
+}
+
 #' Locate the bundled Julia engine source directory.
 #' @keywords internal
 default_engine_src_dir <- function() {
