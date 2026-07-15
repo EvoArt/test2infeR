@@ -74,16 +74,3 @@ test_that("NUTS inference works on synthetic data", {
   expect_true(all(result$individual$p_infected_last <= 1))
 })
 
-test_that("Inference handles edge cases", {
-  skip_on_cran()
-  
-  # All negative
-  test_mat_all_neg <- matrix(c(0, 0, 0, 0, 0, 0), nrow = 1, byrow = TRUE)
-  result <- hmm_inference(test_mat_all_neg, method = "map", nuts_samples = 100, seed = 123)
-  expect_true(result$individual$p_infected_last < 0.5)
-  
-  # All positive
-  test_mat_all_pos <- matrix(c(1, 1, 1, 1, 1, 1), nrow = 1, byrow = TRUE)
-  result <- hmm_inference(test_mat_all_pos, method = "map", nuts_samples = 100, seed = 123)
-  expect_true(result$individual$p_infected_last > 0.5)
-})

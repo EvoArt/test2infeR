@@ -65,6 +65,7 @@ jobs:
               "JLD2",
               "LogExpFunctions",
               "ProgressMeter",
+              "RCall",
               "StaticArrays",
               "Suppressor",
               "Turing"
@@ -135,6 +136,7 @@ jobs:
               "JLD2",
               "LogExpFunctions",
               "ProgressMeter",
+              "RCall",
               "StaticArrays",
               "Suppressor",
               "Turing"
