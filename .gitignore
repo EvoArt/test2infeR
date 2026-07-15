@@ -1,0 +1,24 @@
+# R package build artifacts
+*.tar.gz
+*.Rcheck
+
+# Julia artifacts
+*.jl.cov
+*.jl.mem
+*.prof
+deps/
+Manifest.toml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test files
+test_package.R
