@@ -39,11 +39,8 @@ jobs:
           use-public-rspm: true
 
       - name: Install Julia dependencies
-        shell: Rscript
         run: |
-          if (!requireNamespace("JuliaCall", quietly = TRUE)) {
-            install.packages("JuliaCall")
-          }
+          Rscript -e 'if (!requireNamespace("JuliaCall", quietly = TRUE)) install.packages("JuliaCall")'
 
       - name: Instantiate Julia environment
         run: |
@@ -91,11 +88,8 @@ jobs:
           use-public-rspm: true
 
       - name: Install Julia dependencies
-        shell: Rscript
         run: |
-          if (!requireNamespace("JuliaCall", quietly = TRUE)) {
-            install.packages("JuliaCall")
-          }
+          Rscript -e 'if (!requireNamespace("JuliaCall", quietly = TRUE)) install.packages("JuliaCall")'
 
       - name: Instantiate Julia environment
         run: |
