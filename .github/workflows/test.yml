@@ -38,16 +38,27 @@ jobs:
           r-version: ${{ matrix.r }}
           use-public-rspm: true
 
-      - name: Install Julia dependencies
+      - name: Install JuliaCall in R
         run: |
           Rscript -e 'if (!requireNamespace("JuliaCall", quietly = TRUE)) install.packages("JuliaCall")'
 
-      - name: Instantiate Julia environment
+      - name: Install Julia packages
         run: |
-          julia --project=inst/julia -e '
+          julia -e '
             using Pkg
-            Pkg.instantiate()
-            Pkg.precompile()
+            Pkg.add([
+              "ADTypes",
+              "CSV", 
+              "DataFrames",
+              "DensityInterface",
+              "Distributions",
+              "HiddenMarkovModels",
+              "JLD2",
+              "LogExpFunctions",
+              "ProgressMeter",
+              "StaticArrays",
+              "Turing"
+            ])
           '
 
       - name: Run R CMD check
@@ -87,16 +98,27 @@ jobs:
           r-version: ${{ matrix.r }}
           use-public-rspm: true
 
-      - name: Install Julia dependencies
+      - name: Install JuliaCall in R
         run: |
           Rscript -e 'if (!requireNamespace("JuliaCall", quietly = TRUE)) install.packages("JuliaCall")'
 
-      - name: Instantiate Julia environment
+      - name: Install Julia packages
         run: |
-          julia --project=inst/julia -e '
+          julia -e '
             using Pkg
-            Pkg.instantiate()
-            Pkg.precompile()
+            Pkg.add([
+              "ADTypes",
+              "CSV", 
+              "DataFrames",
+              "DensityInterface",
+              "Distributions",
+              "HiddenMarkovModels",
+              "JLD2",
+              "LogExpFunctions",
+              "ProgressMeter",
+              "StaticArrays",
+              "Turing"
+            ])
           '
 
       - name: Run R CMD check
