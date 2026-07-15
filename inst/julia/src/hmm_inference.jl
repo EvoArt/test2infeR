@@ -14,14 +14,14 @@ clamp_prob(x; eps=1e-9) = clamp(x, eps, 1 - eps)
 season_of(t::Int, S=4) = (t - 1) % S + 1
 year_of(t::Int, S=4) = (t - 1) ÷ S + 1
 
-# Per-observation control: global time index + this badger's sex code
+# Per-observation control: global time index + this individual's sex code
 struct Control
     t::Int
     sex_code::Float64   # 1.0 = female, 0.0 = male
 end
 
 # HMM struct
-struct BadgerHMM{T,V1<:AbstractVector{T},V2<:AbstractVector{T},V3<:AbstractVector{T},V4<:AbstractVector{T}} <: AbstractHMM
+struct DiagnosticHMM{T,V1<:AbstractVector{T},V2<:AbstractVector{T},V3<:AbstractVector{T},V4<:AbstractVector{T}} <: AbstractHMM
     π1        :: T
     alpha     :: V1     # length S (season fixed effects)
     gamma     :: V2     # length n_years (year effects, already scaled by sigma_g)
@@ -30,11 +30,11 @@ struct BadgerHMM{T,V1<:AbstractVector{T},V2<:AbstractVector{T},V3<:AbstractVecto
     Sp        :: V4
     S         :: Int
 end
-Base.length(::BadgerHMM) = 2
+Base.length(::DiagnosticHMM) = 2
 
-HiddenMarkovModels.initialization(h::BadgerHMM) = SVector(1 - h.π1, h.π1)
+HiddenMarkovModels.initialization(h::DiagnosticHMM) = SVector(1 - h.π1, h.π1)
 
-function HiddenMarkovModels.transition_matrix(h::BadgerHMM, c::Control)
+function HiddenMarkovModels.transition_matrix(h::DiagnosticHMM, c::Control)
     lam = clamp_prob(logistic(h.alpha[season_of(c.t, h.S)] + h.gamma[year_of(c.t, h.S)] + h.delta_sex * c.sex_code))
     return SMatrix{2,2}(1 - lam, zero(lam), lam, one(lam))
 end
@@ -55,7 +55,7 @@ function DensityInterface.logdensityof(d::TBEmission, x::AbstractVector)
     end
     return ll
 end
-function HiddenMarkovModels.obs_distributions(h::BadgerHMM, ::Control)
+function HiddenMarkovModels.obs_distributions(h::DiagnosticHMM, ::Control)
     SVector(TBEmission(h.Se, h.Sp, false), TBEmission(h.Se, h.Sp, true))
 end
 
@@ -63,7 +63,7 @@ end
 function HiddenMarkovModels._forward_digest_observation!(
     current_state_marginals::AbstractVector{<:Real},
     current_obs_likelihoods::AbstractVector{<:Real},
-    h::BadgerHMM,
+    h::DiagnosticHMM,
     obs,
     c::Control;
     error_if_not_finite::Bool,
@@ -107,7 +107,7 @@ se_priors = beta_from_moments.(SE_PRIOR_MEANS, SE_PRIOR_STDS)
 sp_priors = beta_from_moments.(SP_PRIOR_MEANS, SP_PRIOR_STDS)
 
 # Turing model
-@model function badger_model(obs_seq, ctrl_seq, seq_ends, S, n_years, se_priors, sp_priors,
+@model function hmm_model(obs_seq, ctrl_seq, seq_ends, S, n_years, se_priors, sp_priors,
                               ::Val{with_sex}=Val(false)) where {with_sex}
     alpha   ~ MvNormal(zeros(S), I(S))
     sigma_g ~ truncated(Normal(0, 0.5); lower=0)
@@ -124,7 +124,7 @@ sp_priors = beta_from_moments.(SP_PRIOR_MEANS, SP_PRIOR_STDS)
     Sp ~ arraydist(sp_priors)
     pi1 ~ Beta(1.0, 5.0)
 
-    hmm = BadgerHMM(pi1, alpha, gamma, delta_sex, Se, Sp, S)
+    hmm = DiagnosticHMM(pi1, alpha, gamma, delta_sex, Se, Sp, S)
     Turing.@addlogprob! logdensityof(hmm, obs_seq, ctrl_seq; seq_ends)
 end
 
@@ -142,10 +142,10 @@ function extract_params(result; with_sex::Bool, n_tests::Int, numSeasons::Int, n
 end
 
 # Posterior infection probability for point estimate (MAP/MLE)
-function p_inf_last_pointestimate(badgers, P, numSeasons::Int)
+function p_inf_last_pointestimate(individuals, P, numSeasons::Int)
     results = Dict{Int, Float64}()
-    for b in badgers
-        hmm = BadgerHMM(P.pi1, P.alpha, P.gamma, P.delta_sex, P.Se, P.Sp, numSeasons)
+    for b in individuals
+        hmm = DiagnosticHMM(P.pi1, P.alpha, P.gamma, P.delta_sex, P.Se, P.Sp, numSeasons)
         ctrl_b = [Control(t, Float64(b.female)) for t in b.times]
         gamma, _ = forward_backward(hmm, b.obs, ctrl_b)
         results[b.id] = gamma[2, end]
@@ -154,11 +154,11 @@ function p_inf_last_pointestimate(badgers, P, numSeasons::Int)
 end
 
 # Infection probability over time for point estimate (MAP/MLE)
-function p_inf_over_time_pointestimate(badgers, P, numSeasons::Int)
+function p_inf_over_time_pointestimate(individuals, P, numSeasons::Int)
     results = Dict{Int, Vector{Float64}}()
     times = Dict{Int, Vector{Int}}()
-    for b in badgers
-        hmm = BadgerHMM(P.pi1, P.alpha, P.gamma, P.delta_sex, P.Se, P.Sp, numSeasons)
+    for b in individuals
+        hmm = DiagnosticHMM(P.pi1, P.alpha, P.gamma, P.delta_sex, P.Se, P.Sp, numSeasons)
         ctrl_b = [Control(t, Float64(b.female)) for t in b.times]
         gamma, _ = forward_backward(hmm, b.obs, ctrl_b)
         results[b.id] = gamma[2, :]
@@ -168,7 +168,7 @@ function p_inf_over_time_pointestimate(badgers, P, numSeasons::Int)
 end
 
 # Posterior infection probability for NUTS
-function p_inf_last_nuts(badgers, chain; with_sex::Bool, n_tests::Int, numSeasons::Int, n_years::Int)
+function p_inf_last_nuts(individuals, chain; with_sex::Bool, n_tests::Int, numSeasons::Int, n_years::Int)
     n_samps = length(vec(chain[@varname(pi1)]))
     pi1s = vec(chain[@varname(pi1)])
     sigma_gs = vec(chain[@varname(sigma_g)])
@@ -179,7 +179,7 @@ function p_inf_last_nuts(badgers, chain; with_sex::Bool, n_tests::Int, numSeason
     Sps = [vec(chain[@varname(Sp[k])]) for k in 1:n_tests]
 
     results = Dict{Int, Float64}()
-    for b in badgers
+    for b in individuals
         ctrl_b = [Control(t, Float64(b.female)) for t in b.times]
         samples = [begin
             alpha = Float64[alphas[s][i] for s in 1:numSeasons]
@@ -187,7 +187,7 @@ function p_inf_last_nuts(badgers, chain; with_sex::Bool, n_tests::Int, numSeason
             delta = Float64(delta_sexs[i])
             Se = Float64[Ses[k][i] for k in 1:n_tests]
             Sp = Float64[Sps[k][i] for k in 1:n_tests]
-            hmm = BadgerHMM(Float64(pi1s[i]), alpha, gamma, delta, Se, Sp, numSeasons)
+            hmm = DiagnosticHMM(Float64(pi1s[i]), alpha, gamma, delta, Se, Sp, numSeasons)
             gam, _ = forward_backward(hmm, b.obs, ctrl_b)
             gam[2, end]
         end for i in 1:n_samps]
@@ -197,7 +197,7 @@ function p_inf_last_nuts(badgers, chain; with_sex::Bool, n_tests::Int, numSeason
 end
 
 # Infection probability over time for NUTS
-function p_inf_over_time_nuts(badgers, chain; with_sex::Bool, n_tests::Int, numSeasons::Int, n_years::Int)
+function p_inf_over_time_nuts(individuals, chain; with_sex::Bool, n_tests::Int, numSeasons::Int, n_years::Int)
     n_samps = length(vec(chain[@varname(pi1)]))
     pi1s = vec(chain[@varname(pi1)])
     sigma_gs = vec(chain[@varname(sigma_g)])
@@ -209,7 +209,7 @@ function p_inf_over_time_nuts(badgers, chain; with_sex::Bool, n_tests::Int, numS
 
     results = Dict{Int, Vector{Float64}}()
     times = Dict{Int, Vector{Int}}()
-    for b in badgers
+    for b in individuals
         ctrl_b = [Control(t, Float64(b.female)) for t in b.times]
         samples = [begin
             alpha = Float64[alphas[s][i] for s in 1:numSeasons]
@@ -217,7 +217,7 @@ function p_inf_over_time_nuts(badgers, chain; with_sex::Bool, n_tests::Int, numS
             delta = Float64(delta_sexs[i])
             Se = Float64[Ses[k][i] for k in 1:n_tests]
             Sp = Float64[Sps[k][i] for k in 1:n_tests]
-            hmm = BadgerHMM(Float64(pi1s[i]), alpha, gamma, delta, Se, Sp, numSeasons)
+            hmm = DiagnosticHMM(Float64(pi1s[i]), alpha, gamma, delta, Se, Sp, numSeasons)
             gam, _ = forward_backward(hmm, b.obs, ctrl_b)
             gam[2, :]
         end for i in 1:n_samps]
@@ -275,14 +275,14 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
     numSeasons = 4
     n_years = 1
     
-    # Create badger data structure
-    badgers = [(id=i, times=[1], obs=[test_mat[i, :]], female=0) for i in 1:n_individuals]
+    # Create individual data structure
+    individuals = [(id=i, times=[1], obs=[test_mat[i, :]], female=0) for i in 1:n_individuals]
     
     # Pack sequences
     obs_seq = Vector{Vector{Float64}}()
     ctrl_seq = Vector{Control}()
     seq_ends = Int[]
-    for b in badgers
+    for b in individuals
         for j in eachindex(b.times)
             push!(obs_seq, b.obs[j])
             push!(ctrl_seq, Control(b.times[j], Float64(b.female)))
@@ -291,7 +291,7 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
     end
     
     # Create model
-    model = badger_model(obs_seq, ctrl_seq, seq_ends, numSeasons, n_years, se_priors, sp_priors, Val(with_sex))
+    model = hmm_model(obs_seq, ctrl_seq, seq_ends, numSeasons, n_years, se_priors, sp_priors, Val(with_sex))
     
     result = if method == "nuts"
         # Fit MAP first for initialization
@@ -300,30 +300,30 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
         init_params = map_.params
         chain = sample(model, NUTS(target_acc; adtype=adtype), nuts_samples; progress=false, check_model=false,
                        initial_params=DynamicPPL.InitFromParams(init_params))
-        p_inf_last = p_inf_last_nuts(badgers, chain; with_sex=with_sex, n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
-        p_inf_over_time_data = p_inf_over_time_nuts(badgers, chain; with_sex=with_sex, n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
+        p_inf_last = p_inf_last_nuts(individuals, chain; with_sex=with_sex, n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
+        p_inf_over_time_data = p_inf_over_time_nuts(individuals, chain; with_sex=with_sex, n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
         prevalence = calculate_prevalence(p_inf_over_time_data.p_inf, p_inf_over_time_data.times, n_individuals)
         (p_inf_last=p_inf_last, p_inf_over_time=p_inf_over_time_data.p_inf, times=p_inf_over_time_data.times, 
          prevalence_times=prevalence.times, prevalence_proportion=prevalence.proportion, prevalence_total=prevalence.total,
-         ids=[b.id for b in badgers])
+         ids=[b.id for b in individuals])
     elseif method == "map"
         map_ = maximum_a_posteriori(model; adtype=adtype, check_model=false)
         P = extract_params(map_; with_sex=with_sex, n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
-        p_inf_last = p_inf_last_pointestimate(badgers, P, numSeasons)
-        p_inf_over_time_data = p_inf_over_time_pointestimate(badgers, P, numSeasons)
+        p_inf_last = p_inf_last_pointestimate(individuals, P, numSeasons)
+        p_inf_over_time_data = p_inf_over_time_pointestimate(individuals, P, numSeasons)
         prevalence = calculate_prevalence(p_inf_over_time_data.p_inf, p_inf_over_time_data.times, n_individuals)
         (p_inf_last=p_inf_last, p_inf_over_time=p_inf_over_time_data.p_inf, times=p_inf_over_time_data.times,
          prevalence_times=prevalence.times, prevalence_proportion=prevalence.proportion, prevalence_total=prevalence.total,
-         ids=[b.id for b in badgers])
+         ids=[b.id for b in individuals])
     elseif method == "mle"
         mle = maximum_likelihood(model; adtype=adtype, check_model=false)
         P = extract_params(mle; with_sex=with_sex, n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
-        p_inf_last = p_inf_last_pointestimate(badgers, P, numSeasons)
-        p_inf_over_time_data = p_inf_over_time_pointestimate(badgers, P, numSeasons)
+        p_inf_last = p_inf_last_pointestimate(individuals, P, numSeasons)
+        p_inf_over_time_data = p_inf_over_time_pointestimate(individuals, P, numSeasons)
         prevalence = calculate_prevalence(p_inf_over_time_data.p_inf, p_inf_over_time_data.times, n_individuals)
         (p_inf_last=p_inf_last, p_inf_over_time=p_inf_over_time_data.p_inf, times=p_inf_over_time_data.times,
          prevalence_times=prevalence.times, prevalence_proportion=prevalence.proportion, prevalence_total=prevalence.total,
-         ids=[b.id for b in badgers])
+         ids=[b.id for b in individuals])
     else
         error("Unknown method: $method")
     end
