@@ -21,11 +21,11 @@ struct Control
 end
 
 # HMM struct
-struct DiagnosticHMM{T,V1<:AbstractVector{T},V2<:AbstractVector{T},V3<:AbstractVector{T},V4<:AbstractVector{T},V5<:AbstractVector{T}} <: AbstractHMM
+struct DiagnosticHMM{T,V1<:AbstractVector{T},V2<:AbstractVector{T},V3<:AbstractVector{T},V4<:AbstractVector{T}} <: AbstractHMM
     π1        :: T
     alpha     :: V1     # length S (season fixed effects)
     gamma     :: V2     # length n_years (year effects, already scaled by sigma_g)
-    beta      :: V5     # covariate coefficients
+    beta      :: Vector{Float64}  # covariate coefficients (always Float64, not differentiated)
     Se        :: V3
     Sp        :: V4
     S         :: Int
@@ -35,7 +35,11 @@ Base.length(::DiagnosticHMM) = 2
 HiddenMarkovModels.initialization(h::DiagnosticHMM) = SVector(1 - h.π1, h.π1)
 
 function HiddenMarkovModels.transition_matrix(h::DiagnosticHMM, c::Control)
-    cov_effect = length(h.beta) > 0 ? dot(h.beta, c.covariates) : 0.0
+    cov_effect = if length(h.beta) > 0 && length(c.covariates) > 0
+        dot(h.beta, c.covariates)
+    else
+        0.0
+    end
     lam = clamp_prob(logistic(h.alpha[season_of(c.t, h.S)] + h.gamma[year_of(c.t, h.S)] + cov_effect))
     return SMatrix{2,2}(1 - lam, zero(lam), lam, one(lam))
 end
@@ -117,7 +121,7 @@ sp_priors = beta_from_moments.(SP_PRIOR_MEANS, SP_PRIOR_STDS)
     if n_covariates > 0
         beta ~ MvNormal(zeros(n_covariates), I(n_covariates))
     else
-        beta = Float64[]
+        beta = [0.0]  # Single dummy covariate for type stability
     end
 
     Se ~ arraydist(se_priors)

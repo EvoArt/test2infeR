@@ -46,11 +46,13 @@ default_engine_project_dir <- function() {
 #'   and the pinned `Manifest.toml`). Defaults to the bundled `inst/julia`.
 #' @param force Re-run even if setup already completed this session.
 #' @param install_julia Auto-download Julia if not found.
+#' @param julia_version Julia version to use (default: "1.10.9").
 #' @param ... Passed to [JuliaCall::julia_setup()].
 #' @return Invisibly, the normalised `src_dir`.
 #' @export
 setup_hmm_engine <- function(src_dir = NULL, project_dir = NULL,
-                             force = FALSE, install_julia = TRUE, ...) {
+                             force = FALSE, install_julia = TRUE, 
+                             julia_version = "1.10.9", ...) {
   if (.hmm_state$setup_done && .hmm_state$engine_loaded && !force) {
     return(invisible(.hmm_state$src_dir))
   }
@@ -67,7 +69,7 @@ setup_hmm_engine <- function(src_dir = NULL, project_dir = NULL,
   }
   project_dir <- normalizePath(project_dir, winslash = "/")
 
-  JuliaCall::julia_setup(installJulia = install_julia, ...)
+  JuliaCall::julia_setup(installJulia = install_julia, julia_version = julia_version, ...)
   .hmm_state$setup_done <- TRUE
 
   JuliaCall::julia_command("import Pkg")
