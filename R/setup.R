@@ -10,7 +10,7 @@
 .onLoad <- function(libname, pkgname) {
   # Automatically set up Julia engine on package load
   tryCatch({
-    setup_hmm_engine(install_julia = FALSE)
+    setup_hmm_engine(install_julia = TRUE)
   }, error = function(e) {
     # Silent fail - user can call setup_hmm_engine() manually if needed
     warning("Julia engine setup failed on package load. Call setup_hmm_engine() manually.")
