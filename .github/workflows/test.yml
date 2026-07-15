@@ -72,6 +72,10 @@ jobs:
             ])
           '
 
+      - name: Pre-install RCall to avoid segfault
+        run: |
+          julia -e 'using RCall; println("RCall loaded successfully")'
+
       - name: Run R CMD check
         uses: r-lib/actions/check-r-package@v2
         with:
@@ -143,6 +147,10 @@ jobs:
               "Turing"
             ])
           '
+
+      - name: Pre-install RCall to avoid segfault
+        run: |
+          julia -e 'using RCall; println("RCall loaded successfully")'
 
       - name: Run R CMD check
         uses: r-lib/actions/check-r-package@v2
