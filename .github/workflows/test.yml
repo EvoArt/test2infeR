@@ -76,6 +76,7 @@ jobs:
         uses: r-lib/actions/check-r-package@v2
         with:
           upload-snapshots: true
+          error-on: '"error"'
 
       - name: Show testthat output
         if: always()
@@ -147,6 +148,7 @@ jobs:
         uses: r-lib/actions/check-r-package@v2
         with:
           upload-snapshots: true
+          error-on: '"error"'
         continue-on-error: true
 
       - name: Show testthat output
