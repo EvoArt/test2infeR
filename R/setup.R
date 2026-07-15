@@ -10,7 +10,7 @@
 #' @keywords internal
 default_engine_src_dir <- function() {
   candidates <- c(
-    system.file("julia", "src", package = "hmminferenceR"),
+    system.file("julia", "src", package = "test2infeR"),
     file.path(getwd(), "inst", "julia", "src")
   )
   for (cand in candidates) {
@@ -23,7 +23,7 @@ default_engine_src_dir <- function() {
 #' @keywords internal
 default_engine_project_dir <- function() {
   candidates <- c(
-    system.file("julia", package = "hmminferenceR"),
+    system.file("julia", package = "test2infeR"),
     file.path(getwd(), "inst", "julia")
   )
   for (cand in candidates) {
