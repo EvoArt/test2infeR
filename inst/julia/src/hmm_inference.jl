@@ -14,10 +14,9 @@ clamp_prob(x; eps=1e-9) = clamp(x, eps, 1 - eps)
 season_of(t::Int, S=4) = (t - 1) % S + 1
 year_of(t::Int, S=4) = (t - 1) ÷ S + 1
 
-# Per-observation control: global time index + covariate vector
+# Per-observation control: global time index
 struct Control
     t::Int
-    covariates::Vector{Float64}   # arbitrary covariate values
 end
 
 # HMM struct
@@ -25,7 +24,6 @@ struct DiagnosticHMM{T,V1<:AbstractVector{T},V2<:AbstractVector{T},V3<:AbstractV
     π1        :: T
     alpha     :: V1     # length S (season fixed effects)
     gamma     :: V2     # length n_years (year effects, already scaled by sigma_g)
-    beta      :: Vector{Float64}  # covariate coefficients (always Float64, not differentiated)
     Se        :: V3
     Sp        :: V4
     S         :: Int
@@ -35,12 +33,7 @@ Base.length(::DiagnosticHMM) = 2
 HiddenMarkovModels.initialization(h::DiagnosticHMM) = SVector(1 - h.π1, h.π1)
 
 function HiddenMarkovModels.transition_matrix(h::DiagnosticHMM, c::Control)
-    cov_effect = if length(h.beta) > 0 && length(c.covariates) > 0
-        dot(h.beta, c.covariates)
-    else
-        0.0
-    end
-    lam = clamp_prob(logistic(h.alpha[season_of(c.t, h.S)] + h.gamma[year_of(c.t, h.S)] + cov_effect))
+    lam = clamp_prob(logistic(h.alpha[season_of(c.t, h.S)] + h.gamma[year_of(c.t, h.S)]))
     return SMatrix{2,2}(1 - lam, zero(lam), lam, one(lam))
 end
 
@@ -112,28 +105,22 @@ se_priors = beta_from_moments.(SE_PRIOR_MEANS, SE_PRIOR_STDS)
 sp_priors = beta_from_moments.(SP_PRIOR_MEANS, SP_PRIOR_STDS)
 
 # Turing model
-@model function hmm_model(obs_seq, ctrl_seq, seq_ends, S, n_years, n_covariates, se_priors, sp_priors)
+@model function hmm_model(obs_seq, ctrl_seq, seq_ends, S, n_years, se_priors, sp_priors)
     alpha   ~ MvNormal(zeros(S), I(S))
     sigma_g ~ truncated(Normal(0, 0.5); lower=0)
     gamma_raw ~ MvNormal(zeros(n_years), I(n_years))
     gamma = sigma_g * gamma_raw
 
-    if n_covariates > 0
-        beta ~ MvNormal(zeros(n_covariates), I(n_covariates))
-    else
-        beta = [0.0]  # Single dummy covariate for type stability
-    end
-
     Se ~ arraydist(se_priors)
     Sp ~ arraydist(sp_priors)
     pi1 ~ Beta(1.0, 5.0)
 
-    hmm = DiagnosticHMM(pi1, alpha, gamma, beta, Se, Sp, S)
+    hmm = DiagnosticHMM(pi1, alpha, gamma, Se, Sp, S)
     Turing.@addlogprob! logdensityof(hmm, obs_seq, ctrl_seq; seq_ends)
 end
 
 # Extract parameters from result
-function extract_params(result; n_covariates::Int, n_tests::Int, numSeasons::Int, n_years::Int)
+function extract_params(result; n_tests::Int, numSeasons::Int, n_years::Int)
     p = result.params
     alpha = [p[@varname(alpha[s])] for s in 1:numSeasons]
     sigma_g = p[@varname(sigma_g)]
@@ -141,16 +128,15 @@ function extract_params(result; n_covariates::Int, n_tests::Int, numSeasons::Int
     Se = [p[@varname(Se[k])] for k in 1:n_tests]
     Sp = [p[@varname(Sp[k])] for k in 1:n_tests]
     pi1 = p[@varname(pi1)]
-    beta = n_covariates > 0 ? [p[@varname(beta[k])] for k in 1:n_covariates] : zeros(0)
-    (pi1=pi1, alpha=alpha, gamma=gamma, beta=beta, Se=Se, Sp=Sp)
+    (pi1=pi1, alpha=alpha, gamma=gamma, Se=Se, Sp=Sp)
 end
 
 # Posterior infection probability for point estimate (MAP/MLE)
 function p_inf_last_pointestimate(individuals, P, numSeasons::Int)
     results = Dict{Int, Float64}()
     for b in individuals
-        hmm = DiagnosticHMM(P.pi1, P.alpha, P.gamma, P.beta, P.Se, P.Sp, numSeasons)
-        ctrl_b = [Control(t, b.covariates) for t in b.times]
+        hmm = DiagnosticHMM(P.pi1, P.alpha, P.gamma, P.Se, P.Sp, numSeasons)
+        ctrl_b = [Control(t) for t in b.times]
         gamma, _ = forward_backward(hmm, b.obs, ctrl_b)
         results[b.id] = gamma[2, end]
     end
@@ -162,8 +148,8 @@ function p_inf_over_time_pointestimate(individuals, P, numSeasons::Int)
     results = Dict{Int, Vector{Float64}}()
     times = Dict{Int, Vector{Int}}()
     for b in individuals
-        hmm = DiagnosticHMM(P.pi1, P.alpha, P.gamma, P.beta, P.Se, P.Sp, numSeasons)
-        ctrl_b = [Control(t, b.covariates) for t in b.times]
+        hmm = DiagnosticHMM(P.pi1, P.alpha, P.gamma, P.Se, P.Sp, numSeasons)
+        ctrl_b = [Control(t) for t in b.times]
         gamma, _ = forward_backward(hmm, b.obs, ctrl_b)
         results[b.id] = gamma[2, :]
         times[b.id] = b.times
@@ -172,26 +158,24 @@ function p_inf_over_time_pointestimate(individuals, P, numSeasons::Int)
 end
 
 # Posterior infection probability for NUTS
-function p_inf_last_nuts(individuals, chain; n_covariates::Int, n_tests::Int, numSeasons::Int, n_years::Int)
+function p_inf_last_nuts(individuals, chain; n_tests::Int, numSeasons::Int, n_years::Int)
     n_samps = length(vec(chain[@varname(pi1)]))
     pi1s = vec(chain[@varname(pi1)])
     sigma_gs = vec(chain[@varname(sigma_g)])
     alphas = [vec(chain[@varname(alpha[s])]) for s in 1:numSeasons]
     gamma_raws = [vec(chain[@varname(gamma_raw[y])]) for y in 1:n_years]
-    betas = n_covariates > 0 ? [vec(chain[@varname(beta[k])]) for k in 1:n_covariates] : [zeros(n_samps) for _ in 1:n_covariates]
     Ses = [vec(chain[@varname(Se[k])]) for k in 1:n_tests]
     Sps = [vec(chain[@varname(Sp[k])]) for k in 1:n_tests]
 
     results = Dict{Int, Float64}()
     for b in individuals
-        ctrl_b = [Control(t, b.covariates) for t in b.times]
+        ctrl_b = [Control(t) for t in b.times]
         samples = [begin
             alpha = Float64[alphas[s][i] for s in 1:numSeasons]
             gamma = Float64[sigma_gs[i] * gamma_raws[y][i] for y in 1:n_years]
-            beta = Float64[betas[k][i] for k in 1:n_covariates]
             Se = Float64[Ses[k][i] for k in 1:n_tests]
             Sp = Float64[Sps[k][i] for k in 1:n_tests]
-            hmm = DiagnosticHMM(Float64(pi1s[i]), alpha, gamma, beta, Se, Sp, numSeasons)
+            hmm = DiagnosticHMM(Float64(pi1s[i]), alpha, gamma, Se, Sp, numSeasons)
             gam, _ = forward_backward(hmm, b.obs, ctrl_b)
             gam[2, end]
         end for i in 1:n_samps]
@@ -201,27 +185,25 @@ function p_inf_last_nuts(individuals, chain; n_covariates::Int, n_tests::Int, nu
 end
 
 # Infection probability over time for NUTS
-function p_inf_over_time_nuts(individuals, chain; n_covariates::Int, n_tests::Int, numSeasons::Int, n_years::Int)
+function p_inf_over_time_nuts(individuals, chain; n_tests::Int, numSeasons::Int, n_years::Int)
     n_samps = length(vec(chain[@varname(pi1)]))
     pi1s = vec(chain[@varname(pi1)])
     sigma_gs = vec(chain[@varname(sigma_g)])
     alphas = [vec(chain[@varname(alpha[s])]) for s in 1:numSeasons]
     gamma_raws = [vec(chain[@varname(gamma_raw[y])]) for y in 1:n_years]
-    betas = n_covariates > 0 ? [vec(chain[@varname(beta[k])]) for k in 1:n_covariates] : [zeros(n_samps) for _ in 1:n_covariates]
     Ses = [vec(chain[@varname(Se[k])]) for k in 1:n_tests]
     Sps = [vec(chain[@varname(Sp[k])]) for k in 1:n_tests]
 
     results = Dict{Int, Vector{Float64}}()
     times = Dict{Int, Vector{Int}}()
     for b in individuals
-        ctrl_b = [Control(t, b.covariates) for t in b.times]
+        ctrl_b = [Control(t) for t in b.times]
         samples = [begin
             alpha = Float64[alphas[s][i] for s in 1:numSeasons]
             gamma = Float64[sigma_gs[i] * gamma_raws[y][i] for y in 1:n_years]
-            beta = Float64[betas[k][i] for k in 1:n_covariates]
             Se = Float64[Ses[k][i] for k in 1:n_tests]
             Sp = Float64[Sps[k][i] for k in 1:n_tests]
-            hmm = DiagnosticHMM(Float64(pi1s[i]), alpha, gamma, beta, Se, Sp, numSeasons)
+            hmm = DiagnosticHMM(Float64(pi1s[i]), alpha, gamma, Se, Sp, numSeasons)
             gam, _ = forward_backward(hmm, b.obs, ctrl_b)
             gam[2, :]
         end for i in 1:n_samps]
@@ -265,21 +247,48 @@ function calculate_prevalence(p_inf_over_time, times, n_individuals)
     (times=all_times, proportion=proportion, total=total)
 end
 
+# Create timepoint x id matrix of infection probabilities
+function create_infection_matrix(p_inf_over_time, times, ids)
+    # Get all unique time points
+    all_times = sort(unique(vcat(values(times)...)))
+    
+    # Create matrix: rows = timepoints, cols = individuals
+    n_times = length(all_times)
+    n_ids = length(ids)
+    inf_matrix = fill(NaN, n_times, n_ids)
+    
+    for (col_idx, id) in enumerate(ids)
+        t_vec = times[id]
+        p_vec = p_inf_over_time[id]
+        
+        for (row_idx, t) in enumerate(all_times)
+            # Only fill if this timepoint is between first and last capture for this individual
+            if t >= minimum(t_vec) && t <= maximum(t_vec)
+                idx = findfirst(==(t), t_vec)
+                if idx !== nothing
+                    inf_matrix[row_idx, col_idx] = p_vec[idx]
+                end
+            end
+        end
+    end
+    
+    (matrix=inf_matrix, times=all_times, ids=ids)
+end
+
 # Main inference function
-function run_hmm_inference(test_mat::Matrix{Float64}, covariates::Matrix{Float64}, 
-                          method::String, nuts_samples::Int, target_acc::Float64, seed::Int)
+function run_hmm_inference(test_mat::Matrix{Float64}, method::String, 
+                          nuts_samples::Int, target_acc::Float64, seed::Int)
     Random.seed!(seed)
     
     # Parse test matrix: assume rows are individuals, columns are tests
     n_individuals = size(test_mat, 1)
     n_tests = size(test_mat, 2)
-    n_covariates = size(covariates, 2)
     n_timepoints = 1
     numSeasons = 4
     n_years = 1
     
     # Create individual data structure
-    individuals = [(id=i, times=[1], obs=[test_mat[i, :]], covariates=covariates[i, :]) for i in 1:n_individuals]
+    individuals = [(id=i, times=[1], obs=[test_mat[i, :]]) for i in 1:n_individuals]
     
     # Pack sequences
     obs_seq = Vector{Vector{Float64}}()
@@ -288,13 +297,13 @@ function run_hmm_inference(test_mat::Matrix{Float64}, covariates::Matrix{Float64
     for b in individuals
         for j in eachindex(b.times)
             push!(obs_seq, b.obs[j])
-            push!(ctrl_seq, Control(b.times[j], b.covariates))
+            push!(ctrl_seq, Control(b.times[j]))
         end
         push!(seq_ends, length(obs_seq))
     end
     
     # Create model
-    model = hmm_model(obs_seq, ctrl_seq, seq_ends, numSeasons, n_years, n_covariates, se_priors, sp_priors)
+    model = hmm_model(obs_seq, ctrl_seq, seq_ends, numSeasons, n_years, se_priors, sp_priors)
     
     result = if method == "nuts"
         # Fit MAP first for initialization
@@ -303,30 +312,33 @@ function run_hmm_inference(test_mat::Matrix{Float64}, covariates::Matrix{Float64
         init_params = map_.params
         chain = sample(model, NUTS(target_acc; adtype=adtype), nuts_samples; progress=false, check_model=false,
                        initial_params=DynamicPPL.InitFromParams(init_params))
-        p_inf_last = p_inf_last_nuts(individuals, chain; n_covariates=n_covariates, n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
-        p_inf_over_time_data = p_inf_over_time_nuts(individuals, chain; n_covariates=n_covariates, n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
+        p_inf_last = p_inf_last_nuts(individuals, chain; n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
+        p_inf_over_time_data = p_inf_over_time_nuts(individuals, chain; n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
         prevalence = calculate_prevalence(p_inf_over_time_data.p_inf, p_inf_over_time_data.times, n_individuals)
+        inf_matrix = create_infection_matrix(p_inf_over_time_data.p_inf, p_inf_over_time_data.times, [b.id for b in individuals])
         (p_inf_last=p_inf_last, p_inf_over_time=p_inf_over_time_data.p_inf, times=p_inf_over_time_data.times, 
          prevalence_times=prevalence.times, prevalence_proportion=prevalence.proportion, prevalence_total=prevalence.total,
-         ids=[b.id for b in individuals])
+         ids=[b.id for b in individuals], infection_matrix=inf_matrix.matrix, infection_matrix_times=inf_matrix.times)
     elseif method == "map"
         map_ = maximum_a_posteriori(model; adtype=adtype, check_model=false)
-        P = extract_params(map_; n_covariates=n_covariates, n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
+        P = extract_params(map_; n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
         p_inf_last = p_inf_last_pointestimate(individuals, P, numSeasons)
         p_inf_over_time_data = p_inf_over_time_pointestimate(individuals, P, numSeasons)
         prevalence = calculate_prevalence(p_inf_over_time_data.p_inf, p_inf_over_time_data.times, n_individuals)
+        inf_matrix = create_infection_matrix(p_inf_over_time_data.p_inf, p_inf_over_time_data.times, [b.id for b in individuals])
         (p_inf_last=p_inf_last, p_inf_over_time=p_inf_over_time_data.p_inf, times=p_inf_over_time_data.times,
          prevalence_times=prevalence.times, prevalence_proportion=prevalence.proportion, prevalence_total=prevalence.total,
-         ids=[b.id for b in individuals])
+         ids=[b.id for b in individuals], infection_matrix=inf_matrix.matrix, infection_matrix_times=inf_matrix.times)
     elseif method == "mle"
         mle = maximum_likelihood(model; adtype=adtype, check_model=false)
-        P = extract_params(mle; n_covariates=n_covariates, n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
+        P = extract_params(mle; n_tests=n_tests, numSeasons=numSeasons, n_years=n_years)
         p_inf_last = p_inf_last_pointestimate(individuals, P, numSeasons)
         p_inf_over_time_data = p_inf_over_time_pointestimate(individuals, P, numSeasons)
         prevalence = calculate_prevalence(p_inf_over_time_data.p_inf, p_inf_over_time_data.times, n_individuals)
+        inf_matrix = create_infection_matrix(p_inf_over_time_data.p_inf, p_inf_over_time_data.times, [b.id for b in individuals])
         (p_inf_last=p_inf_last, p_inf_over_time=p_inf_over_time_data.p_inf, times=p_inf_over_time_data.times,
          prevalence_times=prevalence.times, prevalence_proportion=prevalence.proportion, prevalence_total=prevalence.total,
-         ids=[b.id for b in individuals])
+         ids=[b.id for b in individuals], infection_matrix=inf_matrix.matrix, infection_matrix_times=inf_matrix.times)
     else
         error("Unknown method: $method")
     end
