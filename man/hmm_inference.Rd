@@ -22,6 +22,7 @@ hmm_inference(
   pi1_a = 1,
   pi1_b = 5,
   penalty = NULL,
+  repeat_captures = c("stack", "pool", "last"),
   start_year = NULL,
   seed = 123
 )
@@ -66,6 +67,12 @@ essentially unchanged (r >= 0.994 across all variants).}
 
 \item{penalty}{Optional logical to enforce Se+Sp>1 soft constraint. If NULL,
 defaults to TRUE when Se/Sp are inferred and FALSE when fixed.}
+
+\item{repeat_captures}{How to treat more than one capture of the same
+animal within one time-step: \code{"stack"} (default) lets each capture
+contribute its own emission terms so repeat positives multiply, \code{"pool"}
+merges them into one observation, \code{"last"} keeps only the final capture
+(legacy behaviour).}
 
 \item{start_year}{Calendar year of \code{time == 1}, used to label the
 \code{year_effect} table. \code{NULL} (default) leaves \code{calendar_year} as \code{NA}.}

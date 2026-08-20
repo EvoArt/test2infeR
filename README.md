@@ -1,6 +1,6 @@
 # test2infeR
 
-R interface to a Julia-based **gridded** Hidden Markov Model (HMM) inference engine for diagnostic testing data.
+Hidden Markov Model (HMM) inference engine for diagnostic testing data.
 
 ## Installation
 
@@ -64,6 +64,12 @@ fit$year_effect
   model. The alternatives smooth the hazard path but leave per-badger infection
   probabilities essentially unchanged (r >= 0.994 across all variants), so keep
   the default unless you specifically want a smooth hazard.
+- `repeat_captures`: what to do when an animal is captured more than once
+  within a single time-step. `"stack"` (default) lets every capture contribute
+  its own emission terms, so repeat results compound; `"pool"` merges them into
+  one observation per time-step; `"last"` keeps only the final capture and
+  discards the rest. **`"last"` was the behaviour before 0.3.0** and is retained
+  only to reproduce earlier fits - it loses data silently.
 - `tests`: select assay panel by names, indices, or a logical mask
 - `se_fixed`/`sp_fixed`: fix Se/Sp to supplied values (MAP/MLE)
 - `se_prior_mean`, `sp_prior_mean`, `se_prior_ci`, `sp_prior_ci`: override default Table-1 priors

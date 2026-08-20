@@ -1,7 +1,7 @@
 Package: test2infeR
 Type: Package
 Title: R Interface to Gridded Julia HMM Diagnostic Inference
-Version: 0.2.0
+Version: 0.3.0
 Authors@R: person("Badger", "Diagnostics", email = "no-reply@example.org",
     role = c("aut", "cre"))
 Description: R interface to a Julia-based gridded Hidden Markov Model (HMM)

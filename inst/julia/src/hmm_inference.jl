@@ -45,12 +45,19 @@ end
 
 DensityInterface.DensityKind(::TBEmission) = HasLogDensity()
 
+# `x` may be longer than the test panel: when a badger is captured more than
+# once in the same time-step, the extra captures are appended to the same
+# observation vector. `mod1` reuses each test's Se/Sp for those repeats, so they
+# contribute additional likelihood terms instead of overwriting one another.
 function DensityInterface.logdensityof(d::TBEmission, x::AbstractVector)
     ll = zero(eltype(d.Se))
+    K = length(d.Se)
     @inbounds for k in eachindex(x)
-        isnan(x[k]) && continue
-        ll += d.infected ? (x[k] == 1 ? log(d.Se[k]) : log(1 - d.Se[k])) :
-                           (x[k] == 1 ? log(1 - d.Sp[k]) : log(d.Sp[k]))
+        xk = x[k]
+        isnan(xk) && continue
+        kk = mod1(k, K)
+        ll += d.infected ? (xk == 1 ? log(d.Se[kk]) : log(1 - d.Se[kk])) :
+                           (xk == 1 ? log(1 - d.Sp[kk]) : log(d.Sp[kk]))
     end
     return ll
 end
@@ -69,11 +76,13 @@ function HiddenMarkovModels._forward_digest_observation!(
 )
     logb1 = zero(eltype(h.Se))
     logb2 = zero(eltype(h.Se))
+    K = length(h.Se)
     @inbounds for k in eachindex(obs)
         v = obs[k]
         isnan(v) && continue
-        pU = v == 1.0 ? (1 - h.Sp[k]) : h.Sp[k]
-        pI = v == 1.0 ? h.Se[k] : (1 - h.Se[k])
+        kk = mod1(k, K)
+        pU = v == 1.0 ? (1 - h.Sp[kk]) : h.Sp[kk]
+        pI = v == 1.0 ? h.Se[kk] : (1 - h.Se[kk])
         logb1 += log(clamp_prob(pU))
         logb2 += log(clamp_prob(pI))
     end
@@ -201,12 +210,65 @@ sigma_prior(process::Symbol) =
     Turing.@addlogprob! logdensityof(hmm, obs_seq, ctrl_seq; seq_ends)
 end
 
-function build_gridded_sequences(individuals; n_tests::Int=6)
+# A badger can be captured more than once within one time-step. `repeat_captures`
+# decides what happens to the extras:
+#
+#   :stack - every capture contributes its own emission terms, so repeat
+#            positives multiply the evidence (the cumulative treatment used by
+#            the reference PPV method).
+#   :pool  - captures are merged into one observation per time-step (positive if
+#            any capture was positive), so repeats do not compound.
+#   :last  - keep only the last capture, discarding the rest. Legacy behaviour,
+#            retained so earlier fits reproduce exactly.
+#
+# Every branch must return a concrete Vector{Float64}: these vectors are pushed
+# into a Vector{Vector{Float64}} and differentiated through, and an abstract
+# element type here surfaces as a hard crash rather than a type error.
+function build_gridded_sequences(individuals; n_tests::Int=6,
+                                 repeat_captures::Symbol=:stack)
+    repeat_captures in (:stack, :pool, :last) ||
+        error("repeat_captures must be :stack, :pool or :last")
+
     map(individuals) do b
         t0, t1 = minimum(b.times), maximum(b.times)
         grid = collect(t0:t1)
-        lookup = Dict(t => j for (j, t) in enumerate(b.times))
-        obs = [haskey(lookup, t) ? b.obs[lookup[t]] : fill(NaN, n_tests) for t in grid]
+
+        lookup = Dict{Int, Vector{Int}}()
+        for (j, t) in enumerate(b.times)
+            push!(get!(lookup, t, Int[]), j)
+        end
+
+        obs = Vector{Vector{Float64}}(undef, length(grid))
+        for (i, t) in enumerate(grid)
+            js = get(lookup, t, Int[])
+            obs[i] = if isempty(js)
+                fill(NaN, n_tests)
+            elseif length(js) == 1
+                Float64.(b.obs[js[1]])
+            elseif repeat_captures === :last
+                Float64.(b.obs[js[end]])
+            elseif repeat_captures === :pool
+                pooled = fill(NaN, n_tests)
+                for k in 1:n_tests
+                    for j in js
+                        v = b.obs[j][k]
+                        isnan(v) && continue
+                        pooled[k] = isnan(pooled[k]) ? v : max(pooled[k], v)
+                    end
+                end
+                pooled
+            else  # :stack
+                stacked = Vector{Float64}(undef, n_tests * length(js))
+                for (n, j) in enumerate(js)
+                    off = (n - 1) * n_tests
+                    for k in 1:n_tests
+                        stacked[off + k] = b.obs[j][k]
+                    end
+                end
+                stacked
+            end
+        end
+
         captured = [haskey(lookup, t) for t in grid]
         (id=b.id, times=grid, obs=obs, captured=captured)
     end
@@ -463,7 +525,7 @@ function annual_hazard(alpha::AbstractVector, gamma::AbstractVector, y::Int, S::
     1 - prod(1 - clamp_prob(logistic(alpha[s] + gamma[y])) for s in 1:S)
 end
 
-function build_individual_sequences(test_mat::Matrix{Float64})
+function build_individual_sequences(test_mat::Matrix{Float64}; repeat_captures::Symbol=:stack)
     if size(test_mat, 2) >= 8
         time_vec = Int.(round.(test_mat[:, 1]))
         id_vec = Int.(round.(test_mat[:, 2]))
@@ -480,11 +542,11 @@ function build_individual_sequences(test_mat::Matrix{Float64})
             obs = [Float64[obs_mat[r, k] for k in 1:n_tests] for r in rows]
             (id=id, times=times, obs=obs)
         end
-        return build_gridded_sequences(base; n_tests=n_tests)
+        return build_gridded_sequences(base; n_tests=n_tests, repeat_captures=repeat_captures)
     end
 
     base = [(id=i, times=[1], obs=[test_mat[i, :]]) for i in 1:size(test_mat, 1)]
-    return build_gridded_sequences(base; n_tests=size(test_mat, 2))
+    return build_gridded_sequences(base; n_tests=size(test_mat, 2), repeat_captures=repeat_captures)
 end
 
 function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
@@ -502,7 +564,8 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                            pi1_a::Float64=1.0,
                            pi1_b::Float64=5.0,
                            penalty::Bool=true,
-                           start_year::Int=0)
+                           start_year::Int=0,
+                           repeat_captures::String="stack")
     Random.seed!(seed)
     test_mat[test_mat .== -10.0] .= NaN
 
@@ -529,8 +592,13 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
     end
     apply_test_mask!(test_mat, test_mask)
 
-    individuals = build_individual_sequences(test_mat)
-    n_tests = length(individuals[1].obs[1])
+    rc = Symbol(repeat_captures)
+    rc in (:stack, :pool, :last) ||
+        error("repeat_captures must be \"stack\", \"pool\" or \"last\"")
+    individuals = build_individual_sequences(test_mat; repeat_captures=rc)
+    # Stacked repeats make some observation vectors longer than the panel, so
+    # take the panel width from the input matrix.
+    n_tests = size(test_mat, 2) >= 8 ? 6 : size(test_mat, 2)
     n_timepoints = maximum(vcat([b.times for b in individuals]...))
     n_years = year_of(n_timepoints, numSeasons)
 
@@ -645,7 +713,8 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                    hazard_sd=hazard_sd,
                    pi1_a=pi1_a,
                    pi1_b=pi1_b,
-                   start_year=start_year))
+                   start_year=start_year,
+                   repeat_captures=String(rc)))
 
     elseif method == "map" || method == "mle"
         est = method == "map" ?
@@ -704,7 +773,8 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                    hazard_sd=hazard_sd,
                    pi1_a=pi1_a,
                    pi1_b=pi1_b,
-                   start_year=start_year))
+                   start_year=start_year,
+                   repeat_captures=String(rc)))
     else
         error("Unknown method: $method")
     end

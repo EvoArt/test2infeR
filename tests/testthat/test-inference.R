@@ -109,3 +109,41 @@ test_that("NUTS with fixed Se/Sp is rejected in R, before Julia runs", {
     "not supported"
   )
 })
+
+test_that("repeat captures in one time-step are stacked by default", {
+  skip_on_cran()
+  skip_without_engine()
+
+  d <- simulate_badger_data(n_badgers = 20, n_years = 4, seed = 41)
+  cols <- c("time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT",
+            "Culture", "DPP", "IGRA", "StatPak")
+
+  # Give one badger a second capture in a time-step it already occupies, and
+  # make the two disagree, so the three rules cannot coincide by accident.
+  extra <- d[1, ]
+  extra$Culture <- 1
+  d2 <- rbind(d, extra)
+  d2 <- d2[order(d2$id, d2$time), ]
+  tm <- as.matrix(d2[, cols])
+
+  fit <- hmm_inference(tm, method = "map", seed = 3)
+  expect_equal(fit$settings$repeat_captures, "stack")
+
+  pooled  <- hmm_inference(tm, method = "map", repeat_captures = "pool", seed = 3)
+  dropped <- hmm_inference(tm, method = "map", repeat_captures = "last", seed = 3)
+
+  expect_equal(pooled$settings$repeat_captures, "pool")
+  expect_equal(dropped$settings$repeat_captures, "last")
+
+  # The disagreeing repeat must actually change the answer, otherwise this
+  # test would pass even if the extra capture were silently discarded.
+  expect_false(isTRUE(all.equal(fit$individual$p_infected_last,
+                                dropped$individual$p_infected_last)))
+})
+
+test_that("an unknown repeat_captures rule is rejected", {
+  expect_error(
+    hmm_inference(matrix(0, 4, 6), method = "map", repeat_captures = "nonsense"),
+    "should be one of"
+  )
+})

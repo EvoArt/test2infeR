@@ -23,6 +23,11 @@
 #' @param pi1_b Beta prior beta for initial prevalence.
 #' @param penalty Optional logical to enforce Se+Sp>1 soft constraint. If NULL,
 #'   defaults to TRUE when Se/Sp are inferred and FALSE when fixed.
+#' @param repeat_captures How to treat more than one capture of the same
+#'   animal within one time-step: `"stack"` (default) lets each capture
+#'   contribute its own emission terms so repeat positives multiply, `"pool"`
+#'   merges them into one observation, `"last"` keeps only the final capture
+#'   (legacy behaviour).
 #' @param start_year Calendar year of `time == 1`, used to label the
 #'   `year_effect` table. `NULL` (default) leaves `calendar_year` as `NA`.
 #' @param seed Random seed
@@ -44,10 +49,12 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
                          pi1_a = 1.0,
                          pi1_b = 5.0,
                          penalty = NULL,
+                         repeat_captures = c("stack", "pool", "last"),
                          start_year = NULL,
                          seed = 123) {
   method <- match.arg(method)
   year_process <- match.arg(year_process)
+  repeat_captures <- match.arg(repeat_captures)
 
   test_names <- c("ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")
 
@@ -170,6 +177,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
   JuliaCall::julia_assign("j_pi1_b", as.numeric(pi1_b))
   JuliaCall::julia_assign("j_penalty", as.logical(penalty))
   JuliaCall::julia_assign("j_start_year", as.integer(if (is.null(start_year)) 0L else start_year))
+  JuliaCall::julia_assign("j_repeat_captures", repeat_captures)
   
   JuliaCall::julia_command(paste0(
     "result = run_hmm_inference(",
@@ -179,7 +187,8 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
     "se_prior_mean=j_se_prior_mean, sp_prior_mean=j_sp_prior_mean, ",
     "se_prior_ci=j_se_prior_ci, sp_prior_ci=j_sp_prior_ci, ",
     "hazard_mean=j_hazard_mean, hazard_sd=j_hazard_sd, ",
-    "pi1_a=j_pi1_a, pi1_b=j_pi1_b, penalty=j_penalty, start_year=j_start_year",
+    "pi1_a=j_pi1_a, pi1_b=j_pi1_b, penalty=j_penalty, start_year=j_start_year, ",
+    "repeat_captures=j_repeat_captures",
     ");"
   ))
   
@@ -312,6 +321,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
       year_process = year_process,
       tests = test_names[test_mask],
       penalty = penalty,
+      repeat_captures = repeat_captures,
       start_year = start_year
     )
   } else {
