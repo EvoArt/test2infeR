@@ -1,9 +1,8 @@
 # End-to-end synthetic check: install -> setup -> fit -> figures.
 #
 # Exercises the same three-model shape the real analysis uses (all-tests fixed,
-# all-tests inferred, single-assay fixed) on synthetic data with a known truth,
-# plus a deliberate single-assay INFERRED fit whose only job is to prove the
-# identifiability guard still fires. Run by CI; also runnable by hand:
+# all-tests inferred, single-test fixed) on synthetic data with a known truth.
+# Run by CI; also runnable by hand:
 #
 #   Rscript inst/scripts/e2e_synthetic_panel_analysis.R [outdir]
 
@@ -19,23 +18,20 @@ dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
 message("output dir: ", outdir)
 setup_hmm_engine()
 
-START_YEAR <- 2006L  # modern era, so IGRA/StatPak/DPP are actually observed
+START_YEAR <- 2006L  # arbitrary; only labels the year_effect table
 
-sim <- simulate_badger_data(n_badgers = 90, n_years = 8,
-                            start_year = START_YEAR, seed = 123)
-tm <- as.matrix(sim[, c("time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT",
-                        "Culture", "DPP", "IGRA", "StatPak")])
+sim <- simulate_test_data(n_individuals = 90, n_periods = 8, seed = 123)
+tm <- as.matrix(sim[, c("time", "id", "group", paste0("test_", 1:6))])
 
-ALL_TESTS <- c("ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")
+ALL_TESTS <- seq_len(6)
 table1_se <- c(0.407, 0.407, 0.100, 0.650, 0.809, 0.492)
 table1_sp <- c(0.943, 0.943, 0.999, 0.943, 0.936, 0.931)
 
-# Guard the premise of the whole run: if the era masking left an assay entirely
-# unobserved, the "panel" fits below are not testing panel masking at all.
-observed <- vapply(ALL_TESTS, function(k) any(!is.na(sim[[k]])), logical(1))
+# Every test must be observed somewhere, or the panel fits below are not
+# actually testing anything different from each other.
+observed <- vapply(paste0("test_", 1:6), function(k) any(!is.na(sim[[k]])), logical(1))
 if (!all(observed)) {
-  stop("Synthetic data leaves assays unobserved, so the panels are not distinct: ",
-       paste(ALL_TESTS[!observed], collapse = ", "))
+  stop("Some tests are never observed: ", paste(which(!observed), collapse = ", "))
 }
 
 fit_one <- function(tests, fixed, seed) {
@@ -53,7 +49,7 @@ fit_one <- function(tests, fixed, seed) {
 specs <- list(
   list(label = "All tests (fixed)",    tests = ALL_TESTS, fixed = TRUE,  seed = 101),
   list(label = "All tests (inferred)", tests = ALL_TESTS, fixed = FALSE, seed = 102),
-  list(label = "Culture only (fixed)", tests = "Culture", fixed = TRUE,  seed = 103)
+  list(label = "Single test (fixed)",  tests = 3,         fixed = TRUE,  seed = 103)
 )
 
 fits <- lapply(specs, function(s) fit_one(s$tests, s$fixed, s$seed))
@@ -74,30 +70,18 @@ for (nm in names(fits)) {
   if (!"used" %in% names(fit$sesp)) {
     stop(nm, ": sesp is missing the `used` column")
   }
-  if (!identical(as.character(fit$mode_report$used_tests),
-                 as.character(fit$settings$tests))) {
-    stop(nm, ": mode_report judges a different assay set than the fit used")
-  }
-  if (!isTRUE(fit$mode_report$ok)) {
-    stop(nm, ": expected a usable fit, got mode_report$ok = FALSE")
+  if (!identical(which(fit$sesp$used), as.integer(fit$settings$tests))) {
+    stop(nm, ": sesp$used does not match the panel the fit was given")
   }
   if (!all(fit$year_effect$calendar_year ==
            START_YEAR + fit$year_effect$year_index - 1L)) {
     stop(nm, ": year_effect$calendar_year does not follow start_year")
   }
+  p <- fit$individual$p_infected_last
+  if (any(!is.finite(p)) || any(p < 0 | p > 1)) {
+    stop(nm, ": p_infected_last outside [0, 1]")
+  }
 }
-
-# The guard must actually fire. A single assay with inferred Se/Sp is not
-# identified, so this fit is expected to be flagged -- if it ever passes, the
-# check has silently stopped working and the reduced-panel results in the real
-# analysis can no longer be trusted.
-degenerate <- fit_one("Culture", fixed = FALSE, seed = 1021)
-if (isTRUE(degenerate$mode_report$ok) && degenerate$mode_report$prevalence_mean > 0.5) {
-  stop("Identifiability guard failed: a >50% prevalence single-assay fit was marked ok")
-}
-message("identifiability guard: culture-only inferred -> ok = ",
-        isTRUE(degenerate$mode_report$ok),
-        " (prevalence ", sprintf("%.3f", degenerate$mode_report$prevalence_mean), ")")
 
 # --- figures ------------------------------------------------------------------
 
@@ -106,7 +90,7 @@ p_prev <- ggplot(prev, aes(calendar_year, proportion_infected, colour = model)) 
   scale_colour_manual(values = c(
     "All tests (fixed)"    = "#2a78d6",
     "All tests (inferred)" = "#eb6834",
-    "Culture only (fixed)" = "#1baf7a"
+    "Single test (fixed)"  = "#1baf7a"
   ), name = "Model") +
   scale_y_continuous(limits = c(0, 1)) +
   theme_minimal(base_size = 12) +

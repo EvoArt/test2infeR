@@ -1,14 +1,16 @@
 Package: test2infeR
 Type: Package
-Title: R Interface to Gridded Julia HMM Diagnostic Inference
-Version: 0.3.0
-Authors@R: person("Badger", "Diagnostics", email = "no-reply@example.org",
+Title: HMM Inference for Longitudinal Diagnostic Test Data
+Version: 0.4.0
+Authors@R: person("Arthur", "Newbury", email = "a.r.newbury@exeter.ac.uk",
     role = c("aut", "cre"))
-Description: R interface to a Julia-based gridded Hidden Markov Model (HMM)
-    inference engine for diagnostic testing data. Supports MAP, MLE, and NUTS,
-    configurable year-effect processes, assay-panel masking, and fixed or
-    inferred Se/Sp with Table-1 priors by default. The package can install
-    Julia and instantiate a pinned Julia project automatically.
+Description: R interface to a Julia-based Hidden Markov Model (HMM) inference
+    engine for longitudinal diagnostic testing data. Latent infection status is
+    inferred on a regular time grid from imperfect test results, with test
+    sensitivity and specificity either held fixed or estimated. Supports MAP,
+    MLE and NUTS, configurable year-effect processes, and selection of a subset
+    of tests. The package can install Julia and instantiate a pinned Julia
+    project automatically.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)

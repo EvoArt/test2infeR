@@ -3,4 +3,4 @@
 export(hmm_engine_loaded)
 export(hmm_inference)
 export(setup_hmm_engine)
-export(simulate_badger_data)
+export(simulate_test_data)

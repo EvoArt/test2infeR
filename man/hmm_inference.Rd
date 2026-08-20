@@ -10,7 +10,7 @@ hmm_inference(
   nuts_samples = 1000,
   target_acc = 0.65,
   year_process = c("iid", "rw1", "rw2", "ar1", "shrunk", "none"),
-  tests = c("ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak"),
+  tests = seq_len(6),
   se_fixed = NULL,
   sp_fixed = NULL,
   se_prior_mean = NULL,
@@ -36,14 +36,10 @@ hmm_inference(
 
 \item{target_acc}{Target acceptance rate for NUTS}
 
-\item{year_process}{Year-effect process. Default \code{"iid"}, the exchangeable
-year effect \code{gamma_y = sigma_g * z_y} with \verb{sigma_g ~ Normal+(0, 0.3)}.
-This matches the validated reference model and reproduces its published
-NUTS fit. Alternatives (\code{"rw1"}, \code{"rw2"}, \code{"ar1"}, \code{"shrunk"}, \code{"none"})
-smooth the hazard path but leave per-badger infection probabilities
-essentially unchanged (r >= 0.994 across all variants).}
+\item{year_process}{Year-effect process: \code{"iid"} (default), \code{"rw1"},
+\code{"rw2"}, \code{"ar1"}, \code{"shrunk"} or \code{"none"}.}
 
-\item{tests}{Test panel to use. Either logical length-6, integer indices, or test names.}
+\item{tests}{Tests to use: a length-6 logical mask or column indices in 1:6.}
 
 \item{se_fixed}{Optional fixed sensitivities (length 6). If supplied, \code{sp_fixed} must also be supplied.}
 
@@ -68,14 +64,12 @@ essentially unchanged (r >= 0.994 across all variants).}
 \item{penalty}{Optional logical to enforce Se+Sp>1 soft constraint. If NULL,
 defaults to TRUE when Se/Sp are inferred and FALSE when fixed.}
 
-\item{repeat_captures}{How to treat more than one capture of the same
-animal within one time-step: \code{"stack"} (default) lets each capture
-contribute its own emission terms so repeat positives multiply, \code{"pool"}
-merges them into one observation, \code{"last"} keeps only the final capture
-(legacy behaviour).}
+\item{repeat_captures}{Handling of repeat captures within one time-step:
+\code{"stack"} (default) keeps each as a separate observation, \code{"pool"} merges
+them into one, \code{"last"} keeps only the final capture.}
 
-\item{start_year}{Calendar year of \code{time == 1}, used to label the
-\code{year_effect} table. \code{NULL} (default) leaves \code{calendar_year} as \code{NA}.}
+\item{start_year}{Calendar year of \code{time == 1}. \code{NULL} (default) leaves
+\code{year_effect$calendar_year} as \code{NA}.}
 
 \item{seed}{Random seed}
 }

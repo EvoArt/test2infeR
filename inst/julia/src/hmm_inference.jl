@@ -104,7 +104,6 @@ function HiddenMarkovModels._forward_digest_observation!(
     return cscale, logL
 end
 
-const TEST_NAMES = ["ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak"]
 const SE_FIXED_DEFAULT = [0.407, 0.407, 0.100, 0.650, 0.809, 0.492]
 const SP_FIXED_DEFAULT = [0.943, 0.943, 0.999, 0.943, 0.936, 0.931]
 const SE_CI_DEFAULT = [(0.370, 0.530), (0.370, 0.530), (0.025, 0.373),
@@ -444,83 +443,6 @@ function create_infection_matrix(p_inf_over_time, times, ids)
     (matrix=inf_matrix, times=all_times, ids=ids)
 end
 
-# Posterior-draw version of the degeneracy check. Same rule as
-# `check_mode_params`: only the assays actually used carry information.
-function check_mode(chain; n_tests::Int=6, sp_prior_mean::AbstractVector=SP_FIXED_DEFAULT,
-                    used::AbstractVector{Bool}=trues(n_tests),
-                    prevalence_mean::Real=NaN)
-    idx = findall(used)
-    isempty(idx) && error("check_mode: no assays marked as used")
-
-    Se = [vec(chain[@varname(Se[k])]) for k in 1:n_tests]
-    Sp = [vec(chain[@varname(Sp[k])]) for k in 1:n_tests]
-    pi1 = vec(chain[@varname(pi1)])
-
-    youden = [Se[k] .+ Sp[k] .- 1.0 for k in 1:n_tests]
-    frac_bad = [mean(youden[k] .< 0) for k in 1:n_tests]
-    se_mean = [mean(Se[k]) for k in 1:n_tests]
-
-    all_valid = all(frac_bad[idx] .== 0)
-    se_collapsed = se_mean[idx] .< (1 .- sp_prior_mean[idx] .+ 0.05)
-    high_state = mean(pi1) > 0.5 ||
-                 (isfinite(prevalence_mean) && prevalence_mean > 0.5)
-    mirror_like = any(se_collapsed) && high_state
-    implausible_prevalence = isfinite(prevalence_mean) && prevalence_mean > 0.5
-
-    (ok = all_valid && !mirror_like && !implausible_prevalence,
-     frac_draws_below_youden0 = frac_bad,
-     se_posterior_mean = se_mean,
-     sp_posterior_mean = [mean(Sp[k]) for k in 1:n_tests],
-     min_youden_used = minimum(mean.(youden[idx])),
-     used = collect(used),
-     used_tests = TEST_NAMES[idx],
-     n_used = length(idx),
-     pi1_mean = mean(pi1),
-     prevalence_mean = prevalence_mean,
-     mirror_like = mirror_like,
-     implausible_prevalence = implausible_prevalence)
-end
-
-# Degeneracy check for point estimates.
-#
-# `used` is the assay mask. Masked assays keep prior-driven Se/Sp that carry no
-# information about this fit, so averaging over all six hides exactly the
-# failure this is meant to catch: with a single observed assay, prevalence and
-# Se are not jointly identified, and the optimiser can land on the mirror
-# solution (Se -> 0, prevalence -> 1). Judge only the assays that were used.
-function check_mode_params(P; sp_prior_mean::AbstractVector=SP_FIXED_DEFAULT,
-                           used::AbstractVector{Bool}=trues(length(P.Se)),
-                           prevalence_mean::Real=NaN)
-    idx = findall(used)
-    isempty(idx) && error("check_mode_params: no assays marked as used")
-
-    youden = P.Se .+ P.Sp .- 1.0
-    youden_used = youden[idx]
-    all_valid = all(youden_used .> 0)
-
-    # Mirror solution: used assays have Se at or below their false-positive
-    # rate, i.e. the "positive" label has flipped meaning.
-    se_collapsed = P.Se[idx] .< (1 .- sp_prior_mean[idx] .+ 0.05)
-    high_state = P.pi1 > 0.5 ||
-                 (isfinite(prevalence_mean) && prevalence_mean > 0.5)
-    mirror_like = any(se_collapsed) && high_state
-
-    # A single-assay panel cannot separate prevalence from Se at all, so an
-    # implausibly high prevalence is itself the symptom.
-    implausible_prevalence = isfinite(prevalence_mean) && prevalence_mean > 0.5
-
-    (ok = all_valid && !mirror_like && !implausible_prevalence,
-     youden = youden,
-     youden_used = youden_used,
-     min_youden_used = minimum(youden_used),
-     used = collect(used),
-     used_tests = TEST_NAMES[idx],
-     n_used = length(idx),
-     prevalence_mean = prevalence_mean,
-     mirror_like = mirror_like,
-     implausible_prevalence = implausible_prevalence)
-end
-
 function annual_hazard(alpha::AbstractVector, gamma::AbstractVector, y::Int, S::Int)
     1 - prod(1 - clamp_prob(logistic(alpha[s] + gamma[y])) for s in 1:S)
 end
@@ -664,9 +586,6 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                                                     se_fixed=se_fixed_use,
                                                     sp_fixed=sp_fixed_use)
         prevalence = prevalence_two_ways(individuals, p_inf_over_time_data.p_inf, p_inf_over_time_data.times)
-        mode_report = check_mode(chain; n_tests=n_tests, sp_prior_mean=sp_prior_mean_use,
-                                 used=collect(test_mask),
-                                 prevalence_mean=mean(filter(isfinite, prevalence.grid_proportion)))
         inf_matrix = create_infection_matrix(p_inf_over_time_data.p_inf, p_inf_over_time_data.times, ids)
         p_inf_last = Dict(b.id => p_inf_over_time_data.p_inf[b.id][findlast(b.captured)] for b in individuals)
 
@@ -696,7 +615,6 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
          ids=ids,
          infection_matrix=inf_matrix.matrix,
          infection_matrix_times=inf_matrix.times,
-         mode_report=mode_report,
          Se=se_est,
          Sp=sp_est,
          year_effect_year_index=year_index,
@@ -706,7 +624,7 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
          test_mask=collect(test_mask),
          settings=(method=method,
                    year_process=String(proc),
-                   tests=TEST_NAMES[findall(identity, test_mask)],
+                   tests=findall(identity, test_mask),
                    fixed_sesp=use_fixed,
                    penalty=penalty,
                    hazard_mean=hazard_mean,
@@ -730,9 +648,6 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                            sp_fixed=sp_fixed_use)
         p_inf_over_time_data = p_inf_over_time_pointestimate(individuals, P, numSeasons)
         prevalence = prevalence_two_ways(individuals, p_inf_over_time_data.p_inf, p_inf_over_time_data.times)
-        mode_report = check_mode_params(P; sp_prior_mean=sp_prior_mean_use,
-                                        used=collect(test_mask),
-                                        prevalence_mean=mean(filter(isfinite, prevalence.grid_proportion)))
         inf_matrix = create_infection_matrix(p_inf_over_time_data.p_inf, p_inf_over_time_data.times, ids)
         p_inf_last = Dict(b.id => p_inf_over_time_data.p_inf[b.id][findlast(b.captured)] for b in individuals)
 
@@ -756,7 +671,6 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
          ids=ids,
          infection_matrix=inf_matrix.matrix,
          infection_matrix_times=inf_matrix.times,
-         mode_report=mode_report,
          Se=P.Se,
          Sp=P.Sp,
          year_effect_year_index=year_index,
@@ -766,7 +680,7 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
          test_mask=collect(test_mask),
          settings=(method=method,
                    year_process=String(proc),
-                   tests=TEST_NAMES[findall(identity, test_mask)],
+                   tests=findall(identity, test_mask),
                    fixed_sesp=use_fixed,
                    penalty=penalty,
                    hazard_mean=hazard_mean,

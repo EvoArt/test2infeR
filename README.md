@@ -19,29 +19,12 @@ library(test2infeR)
 # Explicitly set up the Julia engine (downloads Julia if needed)
 setup_hmm_engine(install_julia = TRUE)
 
-# Synthetic data for quick checks / CI
-d <- simulate_badger_data(n_badgers = 80, n_years = 8, seed = 123)
-test_mat <- as.matrix(d[, c(
-  "time", "id", "group",
-  "ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak"
-)])
-
-# MAP is default, iid year effect is default
+# test_mat: one row per capture. Columns are time, id, group, then the six
+# test results (1 positive, 0 negative, NA not run).
 fit <- hmm_inference(test_mat)
 
-# Label the year effect with real calendar years (time == 1 is start_year Q1)
-fit_dated <- hmm_inference(test_mat, start_year = 2006)
-
-# Panel masking + fixed Se/Sp
-fit_fixed_cgi <- hmm_inference(
-  test_mat,
-  tests = c("Culture", "IGRA", "StatPak"),
-  se_fixed = c(0.407, 0.407, 0.100, 0.650, 0.809, 0.492),
-  sp_fixed = c(0.943, 0.943, 0.999, 0.943, 0.936, 0.931)
-)
-
-# Alternate year process
-fit_rw1 <- hmm_inference(test_mat, year_process = "rw1")
+# A subset of the tests, by column
+fit_subset <- hmm_inference(test_mat, tests = c(3, 5, 6))
 
 # Outputs
 fit$individual
@@ -68,11 +51,11 @@ fit$year_effect
   within a single time-step. `"stack"` (default) lets every capture contribute
   its own emission terms, so repeat results compound; `"pool"` merges them into
   one observation per time-step; `"last"` keeps only the final capture and
-  discards the rest. **`"last"` was the behaviour before 0.3.0** and is retained
-  only to reproduce earlier fits - it loses data silently.
-- `tests`: select assay panel by names, indices, or a logical mask
+  discards the rest (the behaviour before 0.3.0, kept only to reproduce
+  earlier fits).
+- `tests`: select the panel by column index (e.g. `c(3, 5, 6)`) or a length-6 logical mask
 - `se_fixed`/`sp_fixed`: fix Se/Sp to supplied values (MAP/MLE)
-- `se_prior_mean`, `sp_prior_mean`, `se_prior_ci`, `sp_prior_ci`: override default Table-1 priors
+- `se_prior_mean`, `sp_prior_mean`, `se_prior_ci`, `sp_prior_ci`: override the default Se/Sp priors
 - `start_year`: calendar year of `time == 1`, used to label `year_effect$calendar_year`
 
 ## Output
@@ -94,42 +77,15 @@ Returns a list containing:
    - `proportion_infected`: Proportion infected
    - `total_infected`: Total number of infected individuals
 
-4. **`sesp`**: Fitted Se/Sp and Youden index by test
-   - `used`: whether the assay was in the panel. **Masked assays keep their
-     prior means** - those rows are not estimates from this fit and must not be
-     read as results.
+4. **`sesp`**: Fitted Se/Sp and Youden index by test, labelled `test_1`..`test_K`
+   - `used`: whether the test was in the panel. Tests left out keep their prior
+     means, so those rows are not estimates.
 
 5. **`year_effect`**: Year-level gamma path and implied annual hazard.
    `calendar_year` is `NA` unless `start_year` was supplied.
 
 6. **`settings`**: Resolved run settings (panel, process, fixed/inferred Se/Sp)
 
-7. **`mode_report`**: Identifiability check. **Judged only on the assays
-   actually used**, since masked assays carry prior-driven Se/Sp that say
-   nothing about the fit. `ok = FALSE` means the fit is on a ridge - its
-   prevalence is not an estimate. See the identifiability note below.
-
-## Implementation
-
-The Julia engine uses a 2-state absorbing HMM (Uninfected -> Infected):
-- Per-season latent grid between first and last capture per badger
-- Seasonal hazards + configurable year process (`iid` default)
-- Test-specific Se/Sp with Table-1 priors by default
-- Optional fixed Se/Sp regime
-- Forward-backward smoothing for individual-level posterior probabilities
-
-## Identifiability
-
-With a **single observed assay and inferred Se/Sp, prevalence and sensitivity
-are not jointly identified.** The posterior is bimodal: one mode has high Se and
-low prevalence, the mirror mode has Se collapsing toward zero and prevalence
-toward one. Which one an optimiser reaches depends only on its starting point,
-so neither is a result.
-
-`mode_report` catches this - it flags a used assay whose Se has fallen to or
-below its false-positive rate, and any fit whose mean prevalence exceeds 50%.
-Always check `fit$mode_report$ok` before reading a prevalence estimate from a
-reduced panel. To use a single assay, fix Se/Sp rather than inferring them.
 
 ## Notes
 

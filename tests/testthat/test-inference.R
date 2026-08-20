@@ -5,19 +5,16 @@ test_that("Julia engine can be set up", {
 })
 
 test_that("synthetic data helper returns expected columns", {
-  d <- simulate_badger_data(n_badgers = 20, n_years = 3, seed = 1)
-  expect_true(all(c(
-    "time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT",
-    "Culture", "DPP", "IGRA", "StatPak", "calendar_year", "quarter"
-  ) %in% names(d)))
+  d <- simulate_test_data(n_individuals = 20, n_periods = 3, seed = 1)
+  expect_true(all(c("time", "id", "group", paste0("test_", 1:6)) %in% names(d)))
   expect_gt(nrow(d), 0)
 })
 
 test_that("MAP inference works with defaults and returns expanded outputs", {
   skip_on_cran()
   skip_without_engine()
-  d <- simulate_badger_data(n_badgers = 24, n_years = 4, seed = 11)
-  test_mat <- as.matrix(d[, c("time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")])
+  d <- simulate_test_data(n_individuals = 24, n_periods = 4, seed = 11)
+  test_mat <- as.matrix(d[, c("time", "id", "group", paste0("test_", 1:6))])
 
   result <- hmm_inference(test_mat, method = "map", seed = 123)
 
@@ -33,8 +30,8 @@ test_that("MAP inference works with defaults and returns expanded outputs", {
 test_that("panel masking and fixed Se/Sp are respected", {
   skip_on_cran()
   skip_without_engine()
-  d <- simulate_badger_data(n_badgers = 22, n_years = 4, seed = 12)
-  test_mat <- as.matrix(d[, c("time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")])
+  d <- simulate_test_data(n_individuals = 22, n_periods = 4, seed = 12)
+  test_mat <- as.matrix(d[, c("time", "id", "group", paste0("test_", 1:6))])
 
   se_fix <- c(0.407, 0.407, 0.100, 0.650, 0.809, 0.492)
   sp_fix <- c(0.943, 0.943, 0.999, 0.943, 0.936, 0.931)
@@ -42,14 +39,14 @@ test_that("panel masking and fixed Se/Sp are respected", {
   fit <- hmm_inference(
     test_mat,
     method = "map",
-    tests = c("Culture", "IGRA", "StatPak"),
+    tests = c(3, 5, 6),
     year_process = "iid",
     se_fixed = se_fix,
     sp_fixed = sp_fix,
     seed = 99
   )
 
-  expect_equal(fit$settings$tests, c("Culture", "IGRA", "StatPak"))
+  expect_equal(as.integer(fit$settings$tests), c(3L, 5L, 6L))
   expect_true(isTRUE(fit$settings$fixed_sesp))
   expect_equal(round(fit$sesp$Se, 6), round(se_fix, 6))
   expect_equal(round(fit$sesp$Sp, 6), round(sp_fix, 6))
@@ -58,8 +55,8 @@ test_that("panel masking and fixed Se/Sp are respected", {
 test_that("NUTS path still works on tiny synthetic problem", {
   skip_on_cran()
   skip_without_engine()
-  d <- simulate_badger_data(n_badgers = 12, n_years = 2, seed = 13)
-  test_mat <- as.matrix(d[, c("time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")])
+  d <- simulate_test_data(n_individuals = 12, n_periods = 2, seed = 13)
+  test_mat <- as.matrix(d[, c("time", "id", "group", paste0("test_", 1:6))])
 
   fit <- hmm_inference(test_mat, method = "nuts", nuts_samples = 30, seed = 321)
   expect_true("individual" %in% names(fit))
@@ -70,8 +67,8 @@ test_that("NUTS path still works on tiny synthetic problem", {
 test_that("start_year labels the year_effect table", {
   skip_on_cran()
   skip_without_engine()
-  d <- simulate_badger_data(n_badgers = 20, n_years = 4, seed = 21)
-  test_mat <- as.matrix(d[, c("time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")])
+  d <- simulate_test_data(n_individuals = 20, n_periods = 4, seed = 21)
+  test_mat <- as.matrix(d[, c("time", "id", "group", paste0("test_", 1:6))])
 
   no_year <- hmm_inference(test_mat, method = "map", seed = 5)
   expect_true(all(is.na(no_year$year_effect$calendar_year)))
@@ -83,21 +80,23 @@ test_that("start_year labels the year_effect table", {
   )
 })
 
-test_that("mode check judges only the assays actually used", {
+test_that("a single-test panel is selected by column index", {
   skip_on_cran()
   skip_without_engine()
-  d <- simulate_badger_data(n_badgers = 24, n_years = 4, seed = 31)
-  test_mat <- as.matrix(d[, c("time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")])
+  d <- simulate_test_data(n_individuals = 24, n_periods = 4, seed = 31)
+  test_mat <- as.matrix(d[, c("time", "id", "group", paste0("test_", 1:6))])
 
-  fit <- hmm_inference(test_mat, method = "map", tests = c("Culture"), seed = 7)
+  fit <- hmm_inference(test_mat, method = "map", tests = 3, seed = 7)
 
-  expect_equal(as.character(fit$mode_report$used_tests), "Culture")
-  expect_equal(as.integer(fit$mode_report$n_used), 1L)
-  # min_youden_used must come from Culture alone, not the prior-driven rest.
-  expect_equal(
-    as.numeric(fit$mode_report$min_youden_used),
-    fit$sesp$Youden[fit$sesp$test == "Culture"],
-    tolerance = 1e-8
+  expect_equal(as.integer(fit$settings$tests), 3L)
+  expect_equal(which(fit$sesp$used), 3L)
+  expect_equal(fit$sesp$test, paste0("test_", 1:6))
+})
+
+test_that("test names are rejected -- tests are positional", {
+  expect_error(
+    hmm_inference(matrix(0, 4, 6), method = "map", tests = "test_3"),
+    "logical mask or numeric indices"
   )
 })
 
@@ -114,14 +113,13 @@ test_that("repeat captures in one time-step are stacked by default", {
   skip_on_cran()
   skip_without_engine()
 
-  d <- simulate_badger_data(n_badgers = 20, n_years = 4, seed = 41)
-  cols <- c("time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT",
-            "Culture", "DPP", "IGRA", "StatPak")
+  d <- simulate_test_data(n_individuals = 20, n_periods = 4, seed = 41)
+  cols <- c("time", "id", "group", paste0("test_", 1:6))
 
-  # Give one badger a second capture in a time-step it already occupies, and
+  # Give one individual a second capture in a time-step it already occupies, and
   # make the two disagree, so the three rules cannot coincide by accident.
   extra <- d[1, ]
-  extra$Culture <- 1
+  extra$test_3 <- 1
   d2 <- rbind(d, extra)
   d2 <- d2[order(d2$id, d2$time), ]
   tm <- as.matrix(d2[, cols])

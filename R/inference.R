@@ -4,13 +4,9 @@
 #' @param method Inference method: "map", "mle", or "nuts"
 #' @param nuts_samples Number of NUTS samples (for method="nuts")
 #' @param target_acc Target acceptance rate for NUTS
-#' @param year_process Year-effect process. Default `"iid"`, the exchangeable
-#'   year effect `gamma_y = sigma_g * z_y` with `sigma_g ~ Normal+(0, 0.3)`.
-#'   This matches the validated reference model and reproduces its published
-#'   NUTS fit. Alternatives (`"rw1"`, `"rw2"`, `"ar1"`, `"shrunk"`, `"none"`)
-#'   smooth the hazard path but leave per-badger infection probabilities
-#'   essentially unchanged (r >= 0.994 across all variants).
-#' @param tests Test panel to use. Either logical length-6, integer indices, or test names.
+#' @param year_process Year-effect process: `"iid"` (default), `"rw1"`,
+#'   `"rw2"`, `"ar1"`, `"shrunk"` or `"none"`.
+#' @param tests Tests to use: a length-6 logical mask or column indices in 1:6.
 #' @param se_fixed Optional fixed sensitivities (length 6). If supplied, `sp_fixed` must also be supplied.
 #' @param sp_fixed Optional fixed specificities (length 6). If supplied, `se_fixed` must also be supplied.
 #' @param se_prior_mean Optional Se prior means (length 6).
@@ -23,13 +19,11 @@
 #' @param pi1_b Beta prior beta for initial prevalence.
 #' @param penalty Optional logical to enforce Se+Sp>1 soft constraint. If NULL,
 #'   defaults to TRUE when Se/Sp are inferred and FALSE when fixed.
-#' @param repeat_captures How to treat more than one capture of the same
-#'   animal within one time-step: `"stack"` (default) lets each capture
-#'   contribute its own emission terms so repeat positives multiply, `"pool"`
-#'   merges them into one observation, `"last"` keeps only the final capture
-#'   (legacy behaviour).
-#' @param start_year Calendar year of `time == 1`, used to label the
-#'   `year_effect` table. `NULL` (default) leaves `calendar_year` as `NA`.
+#' @param repeat_captures Handling of repeat captures within one time-step:
+#'   `"stack"` (default) keeps each as a separate observation, `"pool"` merges
+#'   them into one, `"last"` keeps only the final capture.
+#' @param start_year Calendar year of `time == 1`. `NULL` (default) leaves
+#'   `year_effect$calendar_year` as `NA`.
 #' @param seed Random seed
 #' @return List with individual infection probabilities and prevalence over time
 #' @export
@@ -37,7 +31,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
                          nuts_samples = 1000,
                          target_acc = 0.65,
                          year_process = c("iid", "rw1", "rw2", "ar1", "shrunk", "none"),
-                         tests = c("ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak"),
+                         tests = seq_len(6),
                          se_fixed = NULL,
                          sp_fixed = NULL,
                          se_prior_mean = NULL,
@@ -56,7 +50,9 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
   year_process <- match.arg(year_process)
   repeat_captures <- match.arg(repeat_captures)
 
-  test_names <- c("ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")
+  # Tests are identified by column position, not by name: the engine has no
+  # knowledge of what any particular assay is.
+  test_labels <- paste0("test_", seq_len(6))
 
   resolve_test_mask <- function(tests_arg) {
     if (is.logical(tests_arg)) {
@@ -72,14 +68,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
       m[unique(idx)] <- TRUE
       return(m)
     }
-    if (is.character(tests_arg)) {
-      bad <- setdiff(tests_arg, test_names)
-      if (length(bad) > 0) {
-        stop("Unknown test names in `tests`: ", paste(bad, collapse = ", "))
-      }
-      return(test_names %in% tests_arg)
-    }
-    stop("`tests` must be logical, numeric indices, or character names.")
+    stop("`tests` must be a length-6 logical mask or numeric indices in 1:6.")
   }
 
   normalize_len6 <- function(x, name) {
@@ -224,7 +213,6 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
   prevalence_grid_total <- JuliaCall::julia_eval("haskey(result, :prevalence_grid_total) ? result.prevalence_grid_total : result.prevalence_total")
   prevalence_capture_proportion <- JuliaCall::julia_eval("haskey(result, :prevalence_capture_proportion) ? result.prevalence_capture_proportion : result.prevalence_proportion")
   prevalence_capture_total <- JuliaCall::julia_eval("haskey(result, :prevalence_capture_total) ? result.prevalence_capture_total : result.prevalence_total")
-  mode_report <- JuliaCall::julia_eval("haskey(result, :mode_report) ? result.mode_report : nothing")
 
   infection_matrix <- JuliaCall::julia_eval("result.infection_matrix")
   infection_matrix_times <- JuliaCall::julia_eval("result.infection_matrix_times")
@@ -296,7 +284,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
   # estimates from this fit. Reading Se/Sp for an unused assay as a result is
   # the mistake this column exists to prevent.
   sesp_df <- data.frame(
-    test = test_names,
+    test = test_labels,
     used = as.logical(test_mask),
     Se = as.numeric(se_vals),
     Sp = as.numeric(sp_vals),
@@ -319,7 +307,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
     list(
       method = method,
       year_process = year_process,
-      tests = test_names[test_mask],
+      tests = which(test_mask),
       penalty = penalty,
       repeat_captures = repeat_captures,
       start_year = start_year
@@ -338,7 +326,6 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
     sesp = sesp_df,
     year_effect = year_effect_df,
     settings = settings_list,
-    mode_report = mode_report,
     method = method
   )
 }
