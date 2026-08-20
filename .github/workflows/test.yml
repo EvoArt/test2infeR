@@ -78,10 +78,18 @@ jobs:
       # JuliaCall's own setup.jl does `using Suppressor` and `using RCall`, so
       # both must exist in the default depot before setup_hmm_engine() runs.
       # This is separate from the engine's own pinned project.
-      - name: Install Julia packages JuliaCall requires
+      #
+      # RCall must also be PRECOMPILED here, in a standalone Julia process with
+      # R_HOME set. Precompiling it lazily from inside R -- which is what
+      # happens if we only Pkg.add it -- segfaults the R process on Ubuntu
+      # (exit 139), because RCall links against the R shared library that is
+      # already loaded. See commit 958d4f3, which added the same step to the
+      # old check jobs for this reason.
+      - name: Install and precompile Julia packages JuliaCall requires
         run: |
           export R_HOME=$(R RHOME)
-          julia -e 'using Pkg; Pkg.add(["Suppressor", "RCall"])'
+          julia -e 'using Pkg; Pkg.add(["Suppressor", "RCall"]); Pkg.precompile()'
+          julia -e 'using RCall; using Suppressor; println("RCall + Suppressor loaded successfully")'
 
       - name: Fresh-library install of this commit and run e2e script
         run: |
