@@ -1,0 +1,4 @@
+^\.github$
+^\.Rbuildignore$
+^test_package\.R$
+^\.gitignore$

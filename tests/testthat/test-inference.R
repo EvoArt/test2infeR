@@ -1,6 +1,6 @@
 test_that("Julia engine can be set up", {
   skip_on_cran()
-  setup_hmm_engine(install_julia = FALSE)
+  skip_without_engine()
   expect_true(hmm_engine_loaded())
 })
 
@@ -15,6 +15,7 @@ test_that("synthetic data helper returns expected columns", {
 
 test_that("MAP inference works with defaults and returns expanded outputs", {
   skip_on_cran()
+  skip_without_engine()
   d <- simulate_badger_data(n_badgers = 24, n_years = 4, seed = 11)
   test_mat <- as.matrix(d[, c("time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")])
 
@@ -31,6 +32,7 @@ test_that("MAP inference works with defaults and returns expanded outputs", {
 
 test_that("panel masking and fixed Se/Sp are respected", {
   skip_on_cran()
+  skip_without_engine()
   d <- simulate_badger_data(n_badgers = 22, n_years = 4, seed = 12)
   test_mat <- as.matrix(d[, c("time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")])
 
@@ -55,6 +57,7 @@ test_that("panel masking and fixed Se/Sp are respected", {
 
 test_that("NUTS path still works on tiny synthetic problem", {
   skip_on_cran()
+  skip_without_engine()
   d <- simulate_badger_data(n_badgers = 12, n_years = 2, seed = 13)
   test_mat <- as.matrix(d[, c("time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")])
 
@@ -66,6 +69,7 @@ test_that("NUTS path still works on tiny synthetic problem", {
 
 test_that("start_year labels the year_effect table", {
   skip_on_cran()
+  skip_without_engine()
   d <- simulate_badger_data(n_badgers = 20, n_years = 4, seed = 21)
   test_mat <- as.matrix(d[, c("time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")])
 
@@ -81,6 +85,7 @@ test_that("start_year labels the year_effect table", {
 
 test_that("mode check judges only the assays actually used", {
   skip_on_cran()
+  skip_without_engine()
   d <- simulate_badger_data(n_badgers = 24, n_years = 4, seed = 31)
   test_mat <- as.matrix(d[, c("time", "id", "group", "ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")])
 

@@ -50,9 +50,17 @@ jobs:
           r-version: release
           use-public-rspm: true
 
+      # `fs` (via pkgload -> testthat) needs libuv headers, and RCall.jl needs
+      # the R shared library. Without these the dependency install fails before
+      # anything is tested.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libuv1-dev libcurl4-openssl-dev libssl-dev libxml2-dev
+
       - name: Install R dependencies
         run: |
-          Rscript -e 'install.packages(c("remotes","ggplot2"), repos="https://cloud.r-project.org")'
+          Rscript -e 'install.packages(c("remotes","ggplot2","JuliaCall"), repos="https://cloud.r-project.org")'
 
       - name: Cache Julia depot
         uses: actions/cache@v4
@@ -61,6 +69,19 @@ jobs:
           key: ${{ runner.os }}-julia-${{ hashFiles('inst/julia/Project.toml', 'inst/julia/Manifest.toml') }}
           restore-keys: |
             ${{ runner.os }}-julia-
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.10'
+
+      # JuliaCall's own setup.jl does `using Suppressor` and `using RCall`, so
+      # both must exist in the default depot before setup_hmm_engine() runs.
+      # This is separate from the engine's own pinned project.
+      - name: Install Julia packages JuliaCall requires
+        run: |
+          export R_HOME=$(R RHOME)
+          julia -e 'using Pkg; Pkg.add(["Suppressor", "RCall"])'
 
       - name: Fresh-library install of this commit and run e2e script
         run: |
@@ -71,7 +92,7 @@ jobs:
             .libPaths(c(lib, .libPaths()));
             remotes::install_local(".", upgrade = "never", dependencies = TRUE, lib = lib);
             library(test2infeR, lib.loc = lib);
-            setup_hmm_engine(install_julia = TRUE);
+            setup_hmm_engine(install_julia = FALSE);
             source("inst/scripts/e2e_synthetic_panel_analysis.R");
           ' e2e_out
 
