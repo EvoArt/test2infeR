@@ -1,92 +1,334 @@
 #' Run HMM inference on diagnostic test data
 #'
 #' @param test_mat Test matrix (individuals x tests)
-#' @param method Inference method: "nuts", "map", or "mle"
+#' @param method Inference method: "map", "mle", or "nuts"
 #' @param nuts_samples Number of NUTS samples (for method="nuts")
 #' @param target_acc Target acceptance rate for NUTS
+#' @param year_process Year-effect process. Default `"iid"`, the exchangeable
+#'   year effect `gamma_y = sigma_g * z_y` with `sigma_g ~ Normal+(0, 0.3)`.
+#'   This matches the validated reference model and reproduces its published
+#'   NUTS fit. Alternatives (`"rw1"`, `"rw2"`, `"ar1"`, `"shrunk"`, `"none"`)
+#'   smooth the hazard path but leave per-badger infection probabilities
+#'   essentially unchanged (r >= 0.994 across all variants).
+#' @param tests Test panel to use. Either logical length-6, integer indices, or test names.
+#' @param se_fixed Optional fixed sensitivities (length 6). If supplied, `sp_fixed` must also be supplied.
+#' @param sp_fixed Optional fixed specificities (length 6). If supplied, `se_fixed` must also be supplied.
+#' @param se_prior_mean Optional Se prior means (length 6).
+#' @param sp_prior_mean Optional Sp prior means (length 6).
+#' @param se_prior_ci Optional Se prior CIs as 6x2 matrix/list (lo, hi per test).
+#' @param sp_prior_ci Optional Sp prior CIs as 6x2 matrix/list (lo, hi per test).
+#' @param hazard_mean Mean for seasonal hazard prior.
+#' @param hazard_sd SD for seasonal hazard prior.
+#' @param pi1_a Beta prior alpha for initial prevalence.
+#' @param pi1_b Beta prior beta for initial prevalence.
+#' @param penalty Optional logical to enforce Se+Sp>1 soft constraint. If NULL,
+#'   defaults to TRUE when Se/Sp are inferred and FALSE when fixed.
+#' @param start_year Calendar year of `time == 1`, used to label the
+#'   `year_effect` table. `NULL` (default) leaves `calendar_year` as `NA`.
 #' @param seed Random seed
 #' @return List with individual infection probabilities and prevalence over time
 #' @export
-hmm_inference <- function(test_mat, method = c("nuts", "map", "mle"),
+hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
                          nuts_samples = 1000,
-                         target_acc = 0.65, seed = 123) {
+                         target_acc = 0.65,
+                         year_process = c("iid", "rw1", "rw2", "ar1", "shrunk", "none"),
+                         tests = c("ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak"),
+                         se_fixed = NULL,
+                         sp_fixed = NULL,
+                         se_prior_mean = NULL,
+                         sp_prior_mean = NULL,
+                         se_prior_ci = NULL,
+                         sp_prior_ci = NULL,
+                         hazard_mean = -3.0,
+                         hazard_sd = 1.5,
+                         pi1_a = 1.0,
+                         pi1_b = 5.0,
+                         penalty = NULL,
+                         start_year = NULL,
+                         seed = 123) {
   method <- match.arg(method)
-  ensure_engine()
-  
-  # Convert test_mat to appropriate format for Julia
-  if (is.data.frame(test_mat)) {
-    # Assume data frame has columns: id, time, test1, test2, ...
-    test_mat <- as.matrix(test_mat[, -c(1, 2)])  # Remove id and time columns
+  year_process <- match.arg(year_process)
+
+  test_names <- c("ELISA_BELT", "ELISA_INDIRECT", "Culture", "DPP", "IGRA", "StatPak")
+
+  resolve_test_mask <- function(tests_arg) {
+    if (is.logical(tests_arg)) {
+      if (length(tests_arg) != 6) stop("`tests` logical vector must be length 6.")
+      return(as.logical(tests_arg))
+    }
+    if (is.numeric(tests_arg)) {
+      idx <- as.integer(tests_arg)
+      if (any(is.na(idx)) || any(idx < 1 | idx > 6)) {
+        stop("`tests` numeric indices must be in 1:6.")
+      }
+      m <- rep(FALSE, 6)
+      m[unique(idx)] <- TRUE
+      return(m)
+    }
+    if (is.character(tests_arg)) {
+      bad <- setdiff(tests_arg, test_names)
+      if (length(bad) > 0) {
+        stop("Unknown test names in `tests`: ", paste(bad, collapse = ", "))
+      }
+      return(test_names %in% tests_arg)
+    }
+    stop("`tests` must be logical, numeric indices, or character names.")
   }
+
+  normalize_len6 <- function(x, name) {
+    if (is.null(x)) return(NULL)
+    x <- as.numeric(x)
+    if (length(x) != 6 || any(!is.finite(x))) {
+      stop("`", name, "` must be a numeric vector of length 6.")
+    }
+    x
+  }
+
+  normalize_ci_6x2 <- function(x, name) {
+    if (is.null(x)) return(NULL)
+    m <- as.matrix(x)
+    if (!is.numeric(m) || !all(dim(m) == c(6, 2))) {
+      stop("`", name, "` must be numeric with shape 6x2.")
+    }
+    m
+  }
+
+  test_mask <- resolve_test_mask(tests)
+  if (!any(test_mask)) stop("`tests` selects no assays.")
+
+  se_fixed <- normalize_len6(se_fixed, "se_fixed")
+  sp_fixed <- normalize_len6(sp_fixed, "sp_fixed")
+  if (xor(is.null(se_fixed), is.null(sp_fixed))) {
+    stop("Provide both `se_fixed` and `sp_fixed`, or neither.")
+  }
+
+  se_prior_mean <- normalize_len6(se_prior_mean, "se_prior_mean")
+  sp_prior_mean <- normalize_len6(sp_prior_mean, "sp_prior_mean")
+  se_prior_ci <- normalize_ci_6x2(se_prior_ci, "se_prior_ci")
+  sp_prior_ci <- normalize_ci_6x2(sp_prior_ci, "sp_prior_ci")
+
+  if (method == "nuts" && !is.null(se_fixed)) {
+    stop("NUTS with fixed Se/Sp is not supported; use method = \"map\" or \"mle\".")
+  }
+
+  if (is.null(penalty)) {
+    penalty <- is.null(se_fixed)
+  }
+  penalty <- isTRUE(penalty)
   
-  # Convert to Julia array
+  if (is.data.frame(test_mat)) {
+    test_mat <- as.matrix(test_mat)
+  }
+
+  if (!is.matrix(test_mat)) {
+    stop("`test_mat` must be a matrix or data frame.")
+  }
+
+  if (ncol(test_mat) < 6) {
+    stop("`test_mat` must have at least 6 test columns.")
+  }
+
+  if (ncol(test_mat) == 7) {
+    test_mat <- test_mat[, 2:7, drop = FALSE]
+  }
+
+  if (ncol(test_mat) >= 8) {
+    test_cols <- (ncol(test_mat) - 5):ncol(test_mat)
+    drop_cols <- test_cols[!test_mask]
+    if (length(drop_cols) > 0) test_mat[, drop_cols] <- NA_real_
+  } else {
+    drop_cols <- which(!test_mask)
+    if (length(drop_cols) > 0) test_mat[, drop_cols] <- NA_real_
+  }
+
+  storage.mode(test_mat) <- "double"
+
+  # All argument validation happens above, so a bad call fails the same way
+  # whether or not the Julia engine has been set up.
+  ensure_engine()
+
   JuliaCall::julia_assign("r_test_mat", test_mat)
-  JuliaCall::julia_command("j_test_mat = Matrix{Float64}(r_test_mat)")
-  
-  # Set parameters
+  # Trailing ";" keeps JuliaCall from echoing the whole matrix / result object
+  # into the console, which otherwise buries every log this produces.
+  JuliaCall::julia_command("j_test_mat = Float64.(coalesce.(Matrix(r_test_mat), NaN));")
+
   JuliaCall::julia_assign("j_nuts_samples", as.integer(nuts_samples))
   JuliaCall::julia_assign("j_target_acc", as.numeric(target_acc))
   JuliaCall::julia_assign("j_seed", as.integer(seed))
   JuliaCall::julia_assign("j_method", method)
+  JuliaCall::julia_assign("j_year_process", year_process)
+  JuliaCall::julia_assign("j_test_mask", as.logical(test_mask))
+  JuliaCall::julia_assign("j_se_fixed", if (is.null(se_fixed)) numeric(0) else as.numeric(se_fixed))
+  JuliaCall::julia_assign("j_sp_fixed", if (is.null(sp_fixed)) numeric(0) else as.numeric(sp_fixed))
+  JuliaCall::julia_assign("j_se_prior_mean", if (is.null(se_prior_mean)) numeric(0) else as.numeric(se_prior_mean))
+  JuliaCall::julia_assign("j_sp_prior_mean", if (is.null(sp_prior_mean)) numeric(0) else as.numeric(sp_prior_mean))
+  JuliaCall::julia_assign("j_se_prior_ci", if (is.null(se_prior_ci)) matrix(numeric(0), nrow = 0, ncol = 0) else se_prior_ci)
+  JuliaCall::julia_assign("j_sp_prior_ci", if (is.null(sp_prior_ci)) matrix(numeric(0), nrow = 0, ncol = 0) else sp_prior_ci)
+  JuliaCall::julia_assign("j_hazard_mean", as.numeric(hazard_mean))
+  JuliaCall::julia_assign("j_hazard_sd", as.numeric(hazard_sd))
+  JuliaCall::julia_assign("j_pi1_a", as.numeric(pi1_a))
+  JuliaCall::julia_assign("j_pi1_b", as.numeric(pi1_b))
+  JuliaCall::julia_assign("j_penalty", as.logical(penalty))
+  JuliaCall::julia_assign("j_start_year", as.integer(if (is.null(start_year)) 0L else start_year))
   
-  # Call Julia inference function
-  JuliaCall::julia_command("result = run_hmm_inference(j_test_mat, j_method, j_nuts_samples, j_target_acc, j_seed)")
+  JuliaCall::julia_command(paste0(
+    "result = run_hmm_inference(",
+    "j_test_mat, j_method, j_nuts_samples, j_target_acc, j_seed; ",
+    "year_process=j_year_process, test_mask=j_test_mask, ",
+    "se_fixed=j_se_fixed, sp_fixed=j_sp_fixed, ",
+    "se_prior_mean=j_se_prior_mean, sp_prior_mean=j_sp_prior_mean, ",
+    "se_prior_ci=j_se_prior_ci, sp_prior_ci=j_sp_prior_ci, ",
+    "hazard_mean=j_hazard_mean, hazard_sd=j_hazard_sd, ",
+    "pi1_a=j_pi1_a, pi1_b=j_pi1_b, penalty=j_penalty, start_year=j_start_year",
+    ");"
+  ))
   
-  # Extract individual-level results
   p_inf_last <- JuliaCall::julia_eval("result.p_inf_last")
   ids <- JuliaCall::julia_eval("result.ids")
-  
-  # Extract infection probabilities over time
+  ids <- as.numeric(ids)
+
+  p_inf_last_vec <- if (is.list(p_inf_last)) {
+    vals <- suppressWarnings(as.numeric(unlist(p_inf_last, use.names = TRUE)))
+    nms <- names(unlist(p_inf_last, use.names = TRUE))
+    if (!is.null(nms) && length(nms) == length(vals)) {
+      lookup <- vals
+      names(lookup) <- nms
+      out <- as.numeric(lookup[as.character(ids)])
+      if (length(out) == length(ids) && any(!is.na(out))) out else vals
+    } else {
+      vals
+    }
+  } else {
+    as.numeric(p_inf_last)
+  }
+  if (length(p_inf_last_vec) != length(ids)) {
+    p_inf_last_vec <- rep_len(p_inf_last_vec, length(ids))
+  }
+
   p_inf_over_time <- JuliaCall::julia_eval("result.p_inf_over_time")
   times <- JuliaCall::julia_eval("result.times")
-  
-  # Extract prevalence over time
+
   prevalence_times <- JuliaCall::julia_eval("result.prevalence_times")
   prevalence_proportion <- JuliaCall::julia_eval("result.prevalence_proportion")
   prevalence_total <- JuliaCall::julia_eval("result.prevalence_total")
-  
-  # Extract infection matrix (timepoint x id)
+  prevalence_grid_proportion <- JuliaCall::julia_eval("haskey(result, :prevalence_grid_proportion) ? result.prevalence_grid_proportion : result.prevalence_proportion")
+  prevalence_grid_total <- JuliaCall::julia_eval("haskey(result, :prevalence_grid_total) ? result.prevalence_grid_total : result.prevalence_total")
+  prevalence_capture_proportion <- JuliaCall::julia_eval("haskey(result, :prevalence_capture_proportion) ? result.prevalence_capture_proportion : result.prevalence_proportion")
+  prevalence_capture_total <- JuliaCall::julia_eval("haskey(result, :prevalence_capture_total) ? result.prevalence_capture_total : result.prevalence_total")
+  mode_report <- JuliaCall::julia_eval("haskey(result, :mode_report) ? result.mode_report : nothing")
+
   infection_matrix <- JuliaCall::julia_eval("result.infection_matrix")
   infection_matrix_times <- JuliaCall::julia_eval("result.infection_matrix_times")
+
+  se_vals <- JuliaCall::julia_eval("haskey(result, :Se) ? result.Se : Float64[]")
+  sp_vals <- JuliaCall::julia_eval("haskey(result, :Sp) ? result.Sp : Float64[]")
+  year_idx <- JuliaCall::julia_eval("haskey(result, :year_effect_year_index) ? result.year_effect_year_index : Int[]")
+  year_calendar <- JuliaCall::julia_eval("haskey(result, :year_effect_calendar_year) ? result.year_effect_calendar_year : Int[]")
+  year_gamma <- JuliaCall::julia_eval("haskey(result, :year_effect_gamma) ? result.year_effect_gamma : Float64[]")
+  year_hazard <- JuliaCall::julia_eval("haskey(result, :year_effect_annual_hazard) ? result.year_effect_annual_hazard : Float64[]")
+  settings <- JuliaCall::julia_eval("haskey(result, :settings) ? result.settings : nothing")
   
-  # Convert individual infection probabilities to data frame
   individual_df <- data.frame(
     id = ids,
-    p_infected_last = p_inf_last,
+    p_infected_last = p_inf_last_vec,
     method = method,
     stringsAsFactors = FALSE
   )
-  
-  # Convert infection probabilities over time to list of data frames
+
   p_inf_over_time_list <- lapply(ids, function(id) {
+    key <- as.character(id)
+    tvals <- times[[key]]
+    pvals <- p_inf_over_time[[key]]
+    if (is.null(tvals) || is.null(pvals)) return(NULL)
+    tvals <- as.numeric(tvals)
+    pvals <- as.numeric(pvals)
+    n <- min(length(tvals), length(pvals))
+    if (n == 0) return(NULL)
     data.frame(
       id = id,
-      time = times[[as.character(id)]],
-      p_infected = p_inf_over_time[[as.character(id)]],
+      time = tvals[seq_len(n)],
+      p_infected = pvals[seq_len(n)],
       stringsAsFactors = FALSE
     )
   })
-  p_inf_over_time_df <- do.call(rbind, p_inf_over_time_list)
-  
-  # Convert prevalence to data frame
+  p_inf_over_time_list <- Filter(Negate(is.null), p_inf_over_time_list)
+  p_inf_over_time_df <- if (length(p_inf_over_time_list) > 0) {
+    do.call(rbind, p_inf_over_time_list)
+  } else {
+    data.frame(id = numeric(0), time = numeric(0), p_infected = numeric(0), stringsAsFactors = FALSE)
+  }
+
   prevalence_df <- data.frame(
     time = prevalence_times,
     proportion_infected = prevalence_proportion,
     total_infected = prevalence_total,
     stringsAsFactors = FALSE
   )
-  
-  # Convert infection matrix to matrix with proper names
+
+  prevalence_grid_df <- data.frame(
+    time = prevalence_times,
+    proportion_infected = prevalence_grid_proportion,
+    total_infected = prevalence_grid_total,
+    stringsAsFactors = FALSE
+  )
+
+  prevalence_capture_df <- data.frame(
+    time = prevalence_times,
+    proportion_infected = prevalence_capture_proportion,
+    total_infected = prevalence_capture_total,
+    stringsAsFactors = FALSE
+  )
+
   infection_matrix_mat <- matrix(infection_matrix, nrow = length(infection_matrix_times))
   rownames(infection_matrix_mat) <- infection_matrix_times
   colnames(infection_matrix_mat) <- ids
+
+  # `used` matters: masked assays keep their prior means, which are not
+  # estimates from this fit. Reading Se/Sp for an unused assay as a result is
+  # the mistake this column exists to prevent.
+  sesp_df <- data.frame(
+    test = test_names,
+    used = as.logical(test_mask),
+    Se = as.numeric(se_vals),
+    Sp = as.numeric(sp_vals),
+    Youden = as.numeric(se_vals) + as.numeric(sp_vals) - 1,
+    stringsAsFactors = FALSE
+  )
+
+  year_calendar <- as.integer(year_calendar)
+  year_calendar[year_calendar < 0] <- NA_integer_
+
+  year_effect_df <- data.frame(
+    year_index = as.integer(year_idx),
+    calendar_year = year_calendar,
+    gamma = as.numeric(year_gamma),
+    annual_hazard = as.numeric(year_hazard),
+    stringsAsFactors = FALSE
+  )
+
+  settings_list <- if (is.null(settings)) {
+    list(
+      method = method,
+      year_process = year_process,
+      tests = test_names[test_mask],
+      penalty = penalty,
+      start_year = start_year
+    )
+  } else {
+    settings
+  }
   
-  # Return as list
   list(
     individual = individual_df,
     p_inf_over_time = p_inf_over_time_df,
     prevalence = prevalence_df,
+    prevalence_grid = prevalence_grid_df,
+    prevalence_capture = prevalence_capture_df,
     infection_matrix = infection_matrix_mat,
+    sesp = sesp_df,
+    year_effect = year_effect_df,
+    settings = settings_list,
+    mode_report = mode_report,
     method = method
   )
 }

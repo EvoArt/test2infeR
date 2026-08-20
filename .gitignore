@@ -7,7 +7,6 @@
 *.jl.mem
 *.prof
 deps/
-Manifest.toml
 
 # OS files
 .DS_Store

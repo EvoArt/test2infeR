@@ -6,17 +6,6 @@
 .hmm_state$engine_loaded <- FALSE
 .hmm_state$src_dir <- NULL
 
-#' @keywords internal
-.onLoad <- function(libname, pkgname) {
-  # Automatically set up Julia engine on package load
-  tryCatch({
-    setup_hmm_engine(install_julia = TRUE)
-  }, error = function(e) {
-    # Silent fail - user can call setup_hmm_engine() manually if needed
-    warning("Julia engine setup failed on package load. Call setup_hmm_engine() manually.")
-  })
-}
-
 #' Locate the bundled Julia engine source directory.
 #' @keywords internal
 default_engine_src_dir <- function() {
@@ -83,7 +72,13 @@ setup_hmm_engine <- function(src_dir = NULL, project_dir = NULL,
 
   JuliaCall::julia_command("import Pkg")
   JuliaCall::julia_command(sprintf('Pkg.activate(raw"%s")', project_dir))
-  JuliaCall::julia_command("Pkg.instantiate()")
+  tryCatch(
+    JuliaCall::julia_command("Pkg.instantiate()"),
+    error = function(e) {
+      JuliaCall::julia_command("Pkg.resolve()")
+      JuliaCall::julia_command("Pkg.instantiate()")
+    }
+  )
 
   load_engine_deps()
   load_engine(src_dir)
@@ -108,7 +103,7 @@ load_engine_deps <- function() {
 #' @keywords internal
 load_engine <- function(src_dir) {
   cmd <- sprintf(
-    'include.(filter(contains(r"\\.jl$"), readdir(raw"%s"; join=true)))',
+    'include.(filter(contains(r"\\.jl$"), readdir(raw"%s"; join=true)));',
     src_dir)
   JuliaCall::julia_command(cmd)
 }
