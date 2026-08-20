@@ -36,6 +36,21 @@ jobs:
           upload-snapshots: true
           error-on: '"error"'
 
+  # KNOWN ISSUE: this job has never passed, on any commit in this repo's
+  # history. R segfaults (exit 139) the moment JuliaCall loads its setup.jl,
+  # which does `using RCall`. Two earlier causes have been fixed and verified
+  # from the logs -- missing libuv headers (broke fs -> pkgload -> testthat)
+  # and missing Suppressor/RCall -- and the job now gets all the way to
+  # engine load before dying. The remaining fault is in the R <-> RCall
+  # interaction on the Ubuntu runner and has NOT been diagnosed; commit
+  # 958d4f3 ("Add RCall pre-install step to avoid Ubuntu segfault") was an
+  # earlier attempt at the same thing that also did not work.
+  #
+  # The e2e script itself runs correctly on a normal machine. Run it by hand:
+  #   Rscript inst/scripts/e2e_synthetic_panel_analysis.R <outdir>
+  #
+  # Do not assume a green badge here means the engine is untested -- the three
+  # `check` jobs above pass, and they exercise everything except Julia.
   e2e:
     runs-on: ubuntu-latest
     env:
@@ -79,12 +94,9 @@ jobs:
       # both must exist in the default depot before setup_hmm_engine() runs.
       # This is separate from the engine's own pinned project.
       #
-      # RCall must also be PRECOMPILED here, in a standalone Julia process with
-      # R_HOME set. Precompiling it lazily from inside R -- which is what
-      # happens if we only Pkg.add it -- segfaults the R process on Ubuntu
-      # (exit 139), because RCall links against the R shared library that is
-      # already loaded. See commit 958d4f3, which added the same step to the
-      # old check jobs for this reason.
+      # NOTE: this is necessary but NOT sufficient -- see the KNOWN ISSUE on the
+      # job below. Both packages precompile and load fine in a standalone Julia
+      # process here; R still segfaults when it loads them through JuliaCall.
       - name: Install and precompile Julia packages JuliaCall requires
         run: |
           export R_HOME=$(R RHOME)
