@@ -1,8 +1,7 @@
-using DataFrames, Distributions, DensityInterface
+using Distributions, DensityInterface
 using HiddenMarkovModels, Turing, StaticArrays
 using LogExpFunctions: logistic, log1pexp
-using Random, Statistics, CSV, LinearAlgebra
-using JLD2
+using Random, Statistics, LinearAlgebra
 using ADTypes
 
 const DynamicPPL = Turing.DynamicPPL
@@ -169,12 +168,11 @@ sigma_prior(process::Symbol) =
     process === :rw2    ? truncated(Normal(0, 0.01); lower=0) :
                           truncated(Normal(0, 0.30); lower=0)
 
-@model function hmm_model(obs_seq, ctrl_seq, seq_ends, S, n_years, se_priors, sp_priors;
+@model function hmm_model(obs_seq, ctrl_seq, seq_ends, S, n_years, se_priors, sp_priors,
+                          entry_year;
                           process::Symbol=:rw1,
                           hazard_mean::Float64=HAZARD_PRIOR_MEAN,
                           hazard_sd::Float64=HAZARD_PRIOR_SD,
-                          pi1_a::Float64=1.0,
-                          pi1_b::Float64=5.0,
                           penalty::Bool=true,
                           se_fixed=nothing,
                           sp_fixed=nothing)
@@ -197,7 +195,12 @@ sigma_prior(process::Symbol) =
     else
         Sp = eltype(alpha).(sp_fixed)
     end
-    pi1 ~ Beta(pi1_a, pi1_b)
+    # Probability of already being infected at first capture. A badger entering
+    # in a high-incidence year is more likely to arrive infected, so this is
+    # tied to the year effect rather than held constant across the study.
+    pi1_0 ~ Normal(-1.7, 1.0)
+    pi1_mult ~ Normal(1.0, 1.0)
+    pi1_vec = clamp_prob.(logistic.(pi1_0 .+ pi1_mult .* gamma))
 
     if penalty
         for k in eachindex(Se)
@@ -205,8 +208,16 @@ sigma_prior(process::Symbol) =
         end
     end
 
-    hmm = DiagnosticHMM(pi1, alpha, gamma, Se, Sp, S)
-    Turing.@addlogprob! logdensityof(hmm, obs_seq, ctrl_seq; seq_ends)
+    # Each badger starts at the pi1 of the year it entered, so the likelihood
+    # is accumulated per badger rather than in one batched call.
+    ll = zero(eltype(alpha))
+    start = 1
+    for (i, e) in enumerate(seq_ends)
+        hmm_i = DiagnosticHMM(pi1_vec[entry_year[i]], alpha, gamma, Se, Sp, S)
+        ll += logdensityof(hmm_i, view(obs_seq, start:e), view(ctrl_seq, start:e))
+        start = e + 1
+    end
+    Turing.@addlogprob! ll
 end
 
 # A badger can be captured more than once within one time-step. `repeat_captures`
@@ -297,25 +308,28 @@ function extract_params(result; n_tests::Int, numSeasons::Int, n_years::Int,
     gamma = Float64.(build_gamma(gamma_raw, sigma_g, process, rho))
     Se = se_fixed === nothing ? Float64[p[@varname(Se[k])] for k in 1:n_tests] : Float64.(se_fixed)
     Sp = sp_fixed === nothing ? Float64[p[@varname(Sp[k])] for k in 1:n_tests] : Float64.(sp_fixed)
-    pi1 = Float64(p[@varname(pi1)])
-    (pi1=pi1, alpha=alpha, gamma=gamma, Se=Se, Sp=Sp, sigma_g=sigma_g, rho=rho)
+    pi1_vec = clamp_prob.(logistic.(Float64(p[@varname(pi1_0)]) .+
+                                    Float64(p[@varname(pi1_mult)]) .* gamma))
+    pi1 = pi1_vec[1]
+    (pi1=pi1, pi1_vec=pi1_vec, alpha=alpha, gamma=gamma, Se=Se, Sp=Sp, sigma_g=sigma_g, rho=rho)
 end
 
 function p_inf_over_time_pointestimate(individuals, P, numSeasons::Int)
     results = Dict{Int, Vector{Float64}}()
     times = Dict{Int, Vector{Int}}()
-    hmm = DiagnosticHMM(P.pi1, P.alpha, P.gamma, P.Se, P.Sp, numSeasons)
     for b in individuals
+        ey = year_of(minimum(b.times), numSeasons)
+        hmm = DiagnosticHMM(P.pi1_vec[ey], P.alpha, P.gamma, P.Se, P.Sp, numSeasons)
         ctrl_b = [Control(t) for t in b.times]
-        gamma, _ = forward_backward(hmm, b.obs, ctrl_b)
-        results[b.id] = gamma[2, :]
+        gam, _ = forward_backward(hmm, b.obs, ctrl_b)
+        results[b.id] = gam[2, :]
         times[b.id] = b.times
     end
     (p_inf=results, times=times)
 end
 
 struct DrawArrays
-    pi1 :: Vector{Float64}
+    pi1 :: Matrix{Float64}   # n_years x n_samps
     alpha :: Matrix{Float64}
     gamma :: Matrix{Float64}
     Se :: Matrix{Float64}
@@ -324,8 +338,9 @@ end
 
 function extract_all_draws(chain; n_tests::Int, S::Int, n_years::Int,
                            process::Symbol=:rw1, se_fixed=nothing, sp_fixed=nothing)
-    pi1 = Float64.(vec(chain[@varname(pi1)]))
-    n_samps = length(pi1)
+    b0 = Float64.(vec(chain[@varname(pi1_0)]))
+    bm = Float64.(vec(chain[@varname(pi1_mult)]))
+    n_samps = length(b0)
     sg = Float64.(vec(chain[@varname(sigma_g)]))
     rho = if process === :ar1
         Float64.(vec(chain[@varname(rho)]))
@@ -362,28 +377,35 @@ function extract_all_draws(chain; n_tests::Int, S::Int, n_years::Int,
         end
     end
 
+    pi1 = Matrix{Float64}(undef, n_years, n_samps)
+    for i in 1:n_samps
+        pi1[:, i] .= clamp_prob.(logistic.(b0[i] .+ bm[i] .* gamma[:, i]))
+    end
+
     DrawArrays(pi1, alpha, gamma, Se, Sp)
 end
 
-@inline function hmm_for_draw(d::DrawArrays, i::Int, S::Int)
-    DiagnosticHMM(d.pi1[i], d.alpha[:, i], d.gamma[:, i], d.Se[:, i], d.Sp[:, i], S)
+@inline function hmm_for_draw(d::DrawArrays, i::Int, S::Int, entry_year::Int)
+    DiagnosticHMM(d.pi1[entry_year, i], d.alpha[:, i], d.gamma[:, i],
+                  d.Se[:, i], d.Sp[:, i], S)
 end
 
 function p_inf_over_time_nuts(individuals, chain; n_tests::Int, numSeasons::Int, n_years::Int,
                               process::Symbol=:rw1, se_fixed=nothing, sp_fixed=nothing)
     draws = extract_all_draws(chain; n_tests=n_tests, S=numSeasons, n_years=n_years,
                               process=process, se_fixed=se_fixed, sp_fixed=sp_fixed)
-    n_samps = length(draws.pi1)
+    n_samps = size(draws.pi1, 2)
 
     results = Dict{Int, Vector{Float64}}()
     times = Dict{Int, Vector{Int}}()
     for b in individuals
         ctrl_b = [Control(t) for t in b.times]
+        ey = year_of(minimum(b.times), numSeasons)
         acc = zeros(length(b.times))
         for i in 1:n_samps
-            hmm = hmm_for_draw(draws, i, numSeasons)
-            gamma, _ = forward_backward(hmm, b.obs, ctrl_b)
-            acc .+= gamma[2, :]
+            hmm = hmm_for_draw(draws, i, numSeasons, ey)
+            gam, _ = forward_backward(hmm, b.obs, ctrl_b)
+            acc .+= gam[2, :]
         end
         results[b.id] = acc ./ n_samps
         times[b.id] = b.times
@@ -483,9 +505,7 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                            sp_prior_ci::AbstractMatrix{<:Real}=zeros(0, 0),
                            hazard_mean::Float64=HAZARD_PRIOR_MEAN,
                            hazard_sd::Float64=HAZARD_PRIOR_SD,
-                           pi1_a::Float64=1.0,
-                           pi1_b::Float64=5.0,
-                           penalty::Bool=true,
+                             penalty::Bool=true,
                            start_year::Int=0,
                            repeat_captures::String="stack")
     Random.seed!(seed)
@@ -552,12 +572,12 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
     sp_fixed_use = use_fixed ? Float64.(sp_fixed) : nothing
 
     obs_seq, ctrl_seq, seq_ends = pack_sequences(individuals)
-    model = hmm_model(obs_seq, ctrl_seq, seq_ends, numSeasons, n_years, se_priors, sp_priors;
+    entry_year = [year_of(minimum(b.times), numSeasons) for b in individuals]
+    model = hmm_model(obs_seq, ctrl_seq, seq_ends, numSeasons, n_years, se_priors, sp_priors,
+                      entry_year;
                       process=proc,
                       hazard_mean=hazard_mean,
                       hazard_sd=hazard_sd,
-                      pi1_a=pi1_a,
-                      pi1_b=pi1_b,
                       penalty=penalty,
                       se_fixed=se_fixed_use,
                       sp_fixed=sp_fixed_use)
@@ -572,11 +592,6 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
         backend = n_chains == 1 ? MCMCSerial() : MCMCThreads()
         chain = sample(model, NUTS(target_acc; adtype=adtype), backend, nuts_samples, n_chains;
                        progress=false, check_model=false)
-
-        chain_cache_path = get(ENV, "TEST2INFER_NUTS_CHAIN_PATH", "")
-        if !isempty(chain_cache_path)
-            jldsave(chain_cache_path; chain)
-        end
 
         p_inf_over_time_data = p_inf_over_time_nuts(individuals, chain;
                                                     n_tests=n_tests,
@@ -617,6 +632,8 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
          infection_matrix_times=inf_matrix.times,
          Se=se_est,
          Sp=sp_est,
+         pi1_vec=clamp_prob.(logistic.(mean(vec(chain[@varname(pi1_0)])) .+
+                                       mean(vec(chain[@varname(pi1_mult)])) .* gamma_est)),
          year_effect_year_index=year_index,
          year_effect_calendar_year=calendar_year,
          year_effect_gamma=gamma_est,
@@ -629,8 +646,6 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                    penalty=penalty,
                    hazard_mean=hazard_mean,
                    hazard_sd=hazard_sd,
-                   pi1_a=pi1_a,
-                   pi1_b=pi1_b,
                    start_year=start_year,
                    repeat_captures=String(rc)))
 
@@ -673,6 +688,7 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
          infection_matrix_times=inf_matrix.times,
          Se=P.Se,
          Sp=P.Sp,
+         pi1_vec=P.pi1_vec,
          year_effect_year_index=year_index,
          year_effect_calendar_year=calendar_year,
          year_effect_gamma=P.gamma,
@@ -685,8 +701,6 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                    penalty=penalty,
                    hazard_mean=hazard_mean,
                    hazard_sd=hazard_sd,
-                   pi1_a=pi1_a,
-                   pi1_b=pi1_b,
                    start_year=start_year,
                    repeat_captures=String(rc)))
     else

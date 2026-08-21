@@ -23,7 +23,7 @@ test_that("MAP inference works with defaults and returns expanded outputs", {
   expect_true(all(result$individual$p_infected_last >= 0 & result$individual$p_infected_last <= 1))
   expect_equal(nrow(result$sesp), 6)
   expect_true(all(c("test", "used", "Se", "Sp", "Youden") %in% names(result$sesp)))
-  expect_equal(result$settings$year_process, "iid")
+  expect_equal(result$settings$year_process, "rw1")
   expect_true(all(result$sesp$used))
 })
 
@@ -144,4 +144,19 @@ test_that("an unknown repeat_captures rule is rejected", {
     hmm_inference(matrix(0, 4, 6), method = "map", repeat_captures = "nonsense"),
     "should be one of"
   )
+})
+
+test_that("initial infection probability varies with entry year", {
+  skip_on_cran()
+  skip_without_engine()
+
+  d <- simulate_test_data(n_individuals = 40, n_periods = 6, seed = 51)
+  tm <- as.matrix(d[, c("time", "id", "group", paste0("test_", 1:6))])
+
+  fit <- hmm_inference(tm, method = "map", start_year = 2000)
+
+  # pi1 is tied to the year effect, so it must not be one constant value.
+  expect_gt(diff(range(fit$pi1_by_year$pi1)), 0)
+  expect_true(all(fit$pi1_by_year$pi1 > 0 & fit$pi1_by_year$pi1 < 1))
+  expect_equal(nrow(fit$pi1_by_year), nrow(fit$year_effect))
 })

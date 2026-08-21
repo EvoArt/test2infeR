@@ -13,8 +13,10 @@ setup_hmm_engine(
 )
 }
 \arguments{
-\item{src_dir}{Path to the engine's \verb{*.jl} source directory. Defaults to
-the bundled \code{inst/julia/src}.}
+\item{src_dir}{Optional path to a directory of loose engine \verb{*.jl} files to
+\code{include()} instead of loading the precompiled package. Intended for
+engine development only -- it bypasses the precompilation cache and so
+restores the slow per-session compile. Normally leave this \code{NULL}.}
 
 \item{project_dir}{Path to the Julia project (containing \code{Project.toml}
 and the pinned \code{Manifest.toml}). Defaults to the bundled \code{inst/julia}.}
@@ -26,10 +28,17 @@ and the pinned \code{Manifest.toml}). Defaults to the bundled \code{inst/julia}.
 \item{...}{Passed to \code{\link[JuliaCall:julia_setup]{JuliaCall::julia_setup()}}.}
 }
 \value{
-Invisibly, the normalised \code{src_dir}.
+Invisibly, the engine source directory (or \code{NULL} when the
+precompiled package was used).
 }
 \description{
 One-time setup. The first call with no local Julia install will download
 and cache one via \code{JuliaCall::julia_setup(installJulia = TRUE)}; later
 sessions reuse it. Run this once per R session before \code{\link[=hmm_inference]{hmm_inference()}}.
+}
+\details{
+The engine is loaded as the precompiled \code{Test2InfEngine} Julia package. The
+first call after installation (or after a Julia/package upgrade) pays a
+one-off precompilation cost of a minute or two; later sessions load the
+cached code and reach the first result in seconds.
 }

@@ -4,7 +4,7 @@
 #' @param method Inference method: "map", "mle", or "nuts"
 #' @param nuts_samples Number of NUTS samples (for method="nuts")
 #' @param target_acc Target acceptance rate for NUTS
-#' @param year_process Year-effect process: `"iid"` (default), `"rw1"`,
+#' @param year_process Year-effect process: `"rw1"` (default), `"iid"`,
 #'   `"rw2"`, `"ar1"`, `"shrunk"` or `"none"`.
 #' @param tests Tests to use: a length-6 logical mask or column indices in 1:6.
 #' @param se_fixed Optional fixed sensitivities (length 6). If supplied, `sp_fixed` must also be supplied.
@@ -15,8 +15,6 @@
 #' @param sp_prior_ci Optional Sp prior CIs as 6x2 matrix/list (lo, hi per test).
 #' @param hazard_mean Mean for seasonal hazard prior.
 #' @param hazard_sd SD for seasonal hazard prior.
-#' @param pi1_a Beta prior alpha for initial prevalence.
-#' @param pi1_b Beta prior beta for initial prevalence.
 #' @param penalty Optional logical to enforce Se+Sp>1 soft constraint. If NULL,
 #'   defaults to TRUE when Se/Sp are inferred and FALSE when fixed.
 #' @param repeat_captures Handling of repeat captures within one time-step:
@@ -30,7 +28,7 @@
 hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
                          nuts_samples = 1000,
                          target_acc = 0.65,
-                         year_process = c("iid", "rw1", "rw2", "ar1", "shrunk", "none"),
+                         year_process = c("rw1", "iid", "rw2", "ar1", "shrunk", "none"),
                          tests = seq_len(6),
                          se_fixed = NULL,
                          sp_fixed = NULL,
@@ -40,8 +38,6 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
                          sp_prior_ci = NULL,
                          hazard_mean = -3.0,
                          hazard_sd = 1.5,
-                         pi1_a = 1.0,
-                         pi1_b = 5.0,
                          penalty = NULL,
                          repeat_captures = c("stack", "pool", "last"),
                          start_year = NULL,
@@ -162,8 +158,6 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
   JuliaCall::julia_assign("j_sp_prior_ci", if (is.null(sp_prior_ci)) matrix(numeric(0), nrow = 0, ncol = 0) else sp_prior_ci)
   JuliaCall::julia_assign("j_hazard_mean", as.numeric(hazard_mean))
   JuliaCall::julia_assign("j_hazard_sd", as.numeric(hazard_sd))
-  JuliaCall::julia_assign("j_pi1_a", as.numeric(pi1_a))
-  JuliaCall::julia_assign("j_pi1_b", as.numeric(pi1_b))
   JuliaCall::julia_assign("j_penalty", as.logical(penalty))
   JuliaCall::julia_assign("j_start_year", as.integer(if (is.null(start_year)) 0L else start_year))
   JuliaCall::julia_assign("j_repeat_captures", repeat_captures)
@@ -176,7 +170,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
     "se_prior_mean=j_se_prior_mean, sp_prior_mean=j_sp_prior_mean, ",
     "se_prior_ci=j_se_prior_ci, sp_prior_ci=j_sp_prior_ci, ",
     "hazard_mean=j_hazard_mean, hazard_sd=j_hazard_sd, ",
-    "pi1_a=j_pi1_a, pi1_b=j_pi1_b, penalty=j_penalty, start_year=j_start_year, ",
+    "penalty=j_penalty, start_year=j_start_year, ",
     "repeat_captures=j_repeat_captures",
     ");"
   ))
@@ -222,6 +216,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
   year_idx <- JuliaCall::julia_eval("haskey(result, :year_effect_year_index) ? result.year_effect_year_index : Int[]")
   year_calendar <- JuliaCall::julia_eval("haskey(result, :year_effect_calendar_year) ? result.year_effect_calendar_year : Int[]")
   year_gamma <- JuliaCall::julia_eval("haskey(result, :year_effect_gamma) ? result.year_effect_gamma : Float64[]")
+  pi1_vals <- JuliaCall::julia_eval("haskey(result, :pi1_vec) ? collect(result.pi1_vec) : Float64[]")
   year_hazard <- JuliaCall::julia_eval("haskey(result, :year_effect_annual_hazard) ? result.year_effect_annual_hazard : Float64[]")
   settings <- JuliaCall::julia_eval("haskey(result, :settings) ? result.settings : nothing")
   
@@ -303,6 +298,13 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
     stringsAsFactors = FALSE
   )
 
+  pi1_by_year_df <- data.frame(
+    year_index = as.integer(year_idx),
+    calendar_year = year_calendar,
+    pi1 = as.numeric(pi1_vals),
+    stringsAsFactors = FALSE
+  )
+
   settings_list <- if (is.null(settings)) {
     list(
       method = method,
@@ -325,6 +327,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
     infection_matrix = infection_matrix_mat,
     sesp = sesp_df,
     year_effect = year_effect_df,
+    pi1_by_year = pi1_by_year_df,
     settings = settings_list,
     method = method
   )

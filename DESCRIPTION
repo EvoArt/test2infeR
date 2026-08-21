@@ -1,7 +1,7 @@
 Package: test2infeR
 Type: Package
 Title: HMM Inference for Longitudinal Diagnostic Test Data
-Version: 0.4.0
+Version: 0.5.0
 Authors@R: person("Arthur", "Newbury", email = "a.r.newbury@exeter.ac.uk",
     role = c("aut", "cre"))
 Description: R interface to a Julia-based Hidden Markov Model (HMM) inference

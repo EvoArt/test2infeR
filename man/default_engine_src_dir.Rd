@@ -7,6 +7,7 @@
 default_engine_src_dir()
 }
 \description{
-Locate the bundled Julia engine source directory.
+Returns the engine package's \code{src} directory. Only used when
+\code{\link[=setup_hmm_engine]{setup_hmm_engine()}} is asked to load loose sources via \verb{src_dir=}.
 }
 \keyword{internal}

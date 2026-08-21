@@ -7,6 +7,7 @@
 load_engine(src_dir)
 }
 \description{
-Include every \verb{*.jl} file in \code{src_dir} into Main.
+Development path only: skips the module wrapper and so also skips the
+precompilation cache.
 }
 \keyword{internal}

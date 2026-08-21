@@ -9,7 +9,7 @@ hmm_inference(
   method = c("map", "mle", "nuts"),
   nuts_samples = 1000,
   target_acc = 0.65,
-  year_process = c("iid", "rw1", "rw2", "ar1", "shrunk", "none"),
+  year_process = c("rw1", "iid", "rw2", "ar1", "shrunk", "none"),
   tests = seq_len(6),
   se_fixed = NULL,
   sp_fixed = NULL,
@@ -19,8 +19,6 @@ hmm_inference(
   sp_prior_ci = NULL,
   hazard_mean = -3,
   hazard_sd = 1.5,
-  pi1_a = 1,
-  pi1_b = 5,
   penalty = NULL,
   repeat_captures = c("stack", "pool", "last"),
   start_year = NULL,
@@ -36,7 +34,7 @@ hmm_inference(
 
 \item{target_acc}{Target acceptance rate for NUTS}
 
-\item{year_process}{Year-effect process: \code{"iid"} (default), \code{"rw1"},
+\item{year_process}{Year-effect process: \code{"rw1"} (default), \code{"iid"},
 \code{"rw2"}, \code{"ar1"}, \code{"shrunk"} or \code{"none"}.}
 
 \item{tests}{Tests to use: a length-6 logical mask or column indices in 1:6.}
@@ -56,10 +54,6 @@ hmm_inference(
 \item{hazard_mean}{Mean for seasonal hazard prior.}
 
 \item{hazard_sd}{SD for seasonal hazard prior.}
-
-\item{pi1_a}{Beta prior alpha for initial prevalence.}
-
-\item{pi1_b}{Beta prior beta for initial prevalence.}
 
 \item{penalty}{Optional logical to enforce Se+Sp>1 soft constraint. If NULL,
 defaults to TRUE when Se/Sp are inferred and FALSE when fixed.}

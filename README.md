@@ -41,12 +41,7 @@ fit$year_effect
 
 ## Main options
 
-- `year_process`: `"iid"` (default), `"rw1"`, `"rw2"`, `"ar1"`, `"shrunk"`, `"none"`.
-  The default is the exchangeable year effect `gamma_y = sigma_g * z_y` with
-  `sigma_g ~ Normal+(0, 0.3)` - the process used by the validated reference
-  model. The alternatives smooth the hazard path but leave per-badger infection
-  probabilities essentially unchanged (r >= 0.994 across all variants), so keep
-  the default unless you specifically want a smooth hazard.
+- `year_process`: `"rw1"` (default), `"iid"`, `"rw2"`, `"ar1"`, `"shrunk"`, `"none"`.
 - `repeat_captures`: what to do when an animal is captured more than once
   within a single time-step. `"stack"` (default) lets every capture contribute
   its own emission terms, so repeat results compound; `"pool"` merges them into
@@ -84,7 +79,10 @@ Returns a list containing:
 5. **`year_effect`**: Year-level gamma path and implied annual hazard.
    `calendar_year` is `NA` unless `start_year` was supplied.
 
-6. **`settings`**: Resolved run settings (panel, process, fixed/inferred Se/Sp)
+6. **`pi1_by_year`**: Probability an individual is already infected when first
+   seen, by entry year. Derived from the year effect, so it varies with it.
+
+7. **`settings`**: Resolved run settings (panel, process, fixed/inferred Se/Sp)
 
 
 ## Notes
