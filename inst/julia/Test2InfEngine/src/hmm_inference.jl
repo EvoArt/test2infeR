@@ -509,6 +509,10 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                            start_year::Int=0,
                            repeat_captures::String="stack")
     Random.seed!(seed)
+    # Never mutate the caller's matrix: both the sentinel replacement below and
+    # the test masking further down write NaN into it, so a caller reusing one
+    # matrix across several fits would have earlier masks leak into later ones.
+    test_mat = copy(test_mat)
     test_mat[test_mat .== -10.0] .= NaN
 
     numSeasons = 4
