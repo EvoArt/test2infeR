@@ -3,6 +3,9 @@
 #' @param test_mat Test matrix (individuals x tests)
 #' @param method Inference method: "map", "mle", or "nuts"
 #' @param nuts_samples Number of NUTS samples (for method="nuts")
+#' @param traj_draws Trajectories sampled per badger for prevalence intervals; 0 skips them
+#' @param chain_cache Path to save the NUTS chain to, before post-processing
+#' @param reuse_chain Load the cached chain instead of sampling again
 #' @param target_acc Target acceptance rate for NUTS
 #' @param year_process Year-effect process: `"rw1"` (default), `"iid"`,
 #'   `"rw2"`, `"ar1"`, `"shrunk"` or `"none"`.
@@ -36,6 +39,9 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
                          sp_prior_mean = NULL,
                          se_prior_ci = NULL,
                          sp_prior_ci = NULL,
+                         traj_draws = 500,
+                         chain_cache = NULL,
+                         reuse_chain = FALSE,
                          hazard_mean = -3.0,
                          hazard_sd = 1.5,
                          penalty = NULL,
@@ -99,10 +105,6 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
   se_prior_ci <- normalize_ci_6x2(se_prior_ci, "se_prior_ci")
   sp_prior_ci <- normalize_ci_6x2(sp_prior_ci, "sp_prior_ci")
 
-  if (method == "nuts" && !is.null(se_fixed)) {
-    stop("NUTS with fixed Se/Sp is not supported; use method = \"map\" or \"mle\".")
-  }
-
   if (is.null(penalty)) {
     penalty <- is.null(se_fixed)
   }
@@ -161,6 +163,10 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
   JuliaCall::julia_assign("j_penalty", as.logical(penalty))
   JuliaCall::julia_assign("j_start_year", as.integer(if (is.null(start_year)) 0L else start_year))
   JuliaCall::julia_assign("j_repeat_captures", repeat_captures)
+  JuliaCall::julia_assign("j_traj_draws", as.integer(traj_draws))
+  JuliaCall::julia_assign("j_reuse_chain", as.logical(reuse_chain))
+  JuliaCall::julia_assign("j_chain_cache",
+                          if (is.null(chain_cache)) "" else normalizePath(chain_cache, mustWork = FALSE))
   
   JuliaCall::julia_command(paste0(
     "result = run_hmm_inference(",
@@ -171,7 +177,8 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
     "se_prior_ci=j_se_prior_ci, sp_prior_ci=j_sp_prior_ci, ",
     "hazard_mean=j_hazard_mean, hazard_sd=j_hazard_sd, ",
     "penalty=j_penalty, start_year=j_start_year, ",
-    "repeat_captures=j_repeat_captures",
+    "repeat_captures=j_repeat_captures, traj_draws=j_traj_draws, ",
+    "chain_cache=j_chain_cache, reuse_chain=j_reuse_chain",
     ");"
   ))
   
@@ -207,6 +214,24 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
   prevalence_grid_total <- JuliaCall::julia_eval("haskey(result, :prevalence_grid_total) ? result.prevalence_grid_total : result.prevalence_total")
   prevalence_capture_proportion <- JuliaCall::julia_eval("haskey(result, :prevalence_capture_proportion) ? result.prevalence_capture_proportion : result.prevalence_proportion")
   prevalence_capture_total <- JuliaCall::julia_eval("haskey(result, :prevalence_capture_total) ? result.prevalence_capture_total : result.prevalence_total")
+
+  has_q <- JuliaCall::julia_eval("haskey(result, :prevalence_grid_lower)")
+  qget <- function(key) if (has_q) JuliaCall::julia_eval(paste0("result.", key)) else NA_real_
+  prevalence_grid_lower <- qget("prevalence_grid_lower")
+  prevalence_grid_upper <- qget("prevalence_grid_upper")
+  prevalence_capture_lower <- qget("prevalence_capture_lower")
+  prevalence_capture_upper <- qget("prevalence_capture_upper")
+
+  prevalence_draws <- if (has_q)
+    JuliaCall::julia_eval("result.prevalence_capture_draws") else NULL
+
+  trajectories <- if (JuliaCall::julia_eval(
+        "haskey(result, :trajectory_id) && !isempty(result.trajectory_id)"))
+    data.frame(
+      id = JuliaCall::julia_eval("result.trajectory_id"),
+      draw = JuliaCall::julia_eval("result.trajectory_draw"),
+      infection_time = JuliaCall::julia_eval("result.trajectory_infection_time")
+    ) else NULL
 
   infection_matrix <- JuliaCall::julia_eval("result.infection_matrix")
   infection_matrix_times <- JuliaCall::julia_eval("result.infection_matrix_times")
@@ -261,6 +286,8 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
     time = prevalence_times,
     proportion_infected = prevalence_grid_proportion,
     total_infected = prevalence_grid_total,
+    lower = prevalence_grid_lower,
+    upper = prevalence_grid_upper,
     stringsAsFactors = FALSE
   )
 
@@ -268,6 +295,8 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
     time = prevalence_times,
     proportion_infected = prevalence_capture_proportion,
     total_infected = prevalence_capture_total,
+    lower = prevalence_capture_lower,
+    upper = prevalence_capture_upper,
     stringsAsFactors = FALSE
   )
 
@@ -323,6 +352,8 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
     p_inf_over_time = p_inf_over_time_df,
     prevalence = prevalence_df,
     prevalence_grid = prevalence_grid_df,
+    prevalence_draws = prevalence_draws,
+    trajectories = trajectories,
     prevalence_capture = prevalence_capture_df,
     infection_matrix = infection_matrix_mat,
     sesp = sesp_df,

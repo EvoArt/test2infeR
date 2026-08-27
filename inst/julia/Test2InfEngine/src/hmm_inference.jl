@@ -2,6 +2,7 @@ using Distributions, DensityInterface
 using HiddenMarkovModels, Turing, StaticArrays
 using LogExpFunctions: logistic, log1pexp
 using Random, Statistics, LinearAlgebra
+using Serialization: serialize, deserialize
 using ADTypes
 
 const DynamicPPL = Turing.DynamicPPL
@@ -328,6 +329,107 @@ function p_inf_over_time_pointestimate(individuals, P, numSeasons::Int)
     (p_inf=results, times=times)
 end
 
+# Sample whole trajectories rather than reading off marginals.
+#
+# The marginals from forward_backward are P(infected at t) one timepoint at a
+# time. They cannot be treated as independent coin flips: the chain is
+# absorbing, so a badger infected at t is infected at every later t, and a
+# badger caught several times in one year contributes the same latent state
+# repeatedly. Averaging independent Bernoullis over captures therefore gives
+# intervals that are far too narrow.
+#
+# Because U -> I is absorbing, a trajectory is determined entirely by WHEN the
+# badger became infected, so the posterior over trajectories is a distribution
+# over that single switch point. P(switch at k) is proportional to the
+# marginal increment, which makes sampling exact and cheap.
+function sample_trajectory!(out::AbstractVector{Bool}, gam::AbstractVector{Float64},
+                            rng::AbstractRNG)
+    n = length(gam)
+    # Increments of the marginal give the probability of first becoming
+    # infected at each step; the leading value covers "already infected".
+    u = rand(rng)
+    acc = gam[1]
+    if u <= acc
+        fill!(out, true)
+        return out
+    end
+    for k in 2:n
+        inc = max(gam[k] - gam[k - 1], 0.0)
+        acc += inc
+        if u <= acc
+            @inbounds for j in 1:n
+                out[j] = j >= k
+            end
+            return out
+        end
+    end
+    fill!(out, false)
+    return out
+end
+
+# Prevalence per sampled trajectory set, at fixed parameters. Returns a
+# n_times x n_reps matrix for each estimand, so the caller can take quantiles.
+function prevalence_trajectory_draws(individuals, p_inf, times, n_reps::Int, seed::Int;
+                                    keep_infection_times::Bool=true)
+    rng = MersenneTwister(seed)
+    by_id = Dict(b.id => b for b in individuals)
+    all_times = sort(unique(vcat(values(times)...)))
+    tindex = Dict(t => i for (i, t) in enumerate(all_times))
+
+    grid_sum = zeros(length(all_times), n_reps)
+    grid_n = zeros(Int, length(all_times))
+    cap_sum = zeros(length(all_times), n_reps)
+    cap_n = zeros(Int, length(all_times))
+
+    for b in individuals
+        gam = p_inf[b.id]
+        tv = times[b.id]
+        traj = Vector{Bool}(undef, length(tv))
+        for r in 1:n_reps
+            sample_trajectory!(traj, gam, rng)
+            for (i, t) in enumerate(tv)
+                ti = tindex[t]
+                grid_sum[ti, r] += traj[i]
+                b.captured[i] && (cap_sum[ti, r] += traj[i])
+            end
+        end
+        for (i, t) in enumerate(tv)
+            ti = tindex[t]
+            grid_n[ti] += 1
+            b.captured[i] && (cap_n[ti] += 1)
+        end
+    end
+
+    # The chain is absorbing, so a trajectory is fully described by the
+    # timepoint at which the badger became infected (0 = never infected within
+    # its record). Storing that instead of the whole path loses nothing.
+    inf_ids = Int[]
+    inf_draw = Int[]
+    inf_time = Int[]
+    if keep_infection_times
+        rng2 = MersenneTwister(seed)
+        for b in individuals
+            gam = p_inf[b.id]; tv = times[b.id]
+            traj = Vector{Bool}(undef, length(tv))
+            for r in 1:n_reps
+                sample_trajectory!(traj, gam, rng2)
+                k = findfirst(traj)
+                push!(inf_ids, b.id); push!(inf_draw, r)
+                push!(inf_time, k === nothing ? 0 : tv[k])
+            end
+        end
+    end
+
+    grid = fill(NaN, length(all_times), n_reps)
+    cap = fill(NaN, length(all_times), n_reps)
+    for ti in 1:length(all_times)
+        grid_n[ti] > 0 && (grid[ti, :] .= grid_sum[ti, :] ./ grid_n[ti])
+        cap_n[ti] > 0 && (cap[ti, :] .= cap_sum[ti, :] ./ cap_n[ti])
+    end
+    (times=all_times, grid=grid, capture=cap,
+     infection_id=inf_ids, infection_draw=inf_draw, infection_time=inf_time)
+end
+
 struct DrawArrays
     pi1 :: Matrix{Float64}   # n_years x n_samps
     alpha :: Matrix{Float64}
@@ -391,26 +493,74 @@ end
 end
 
 function p_inf_over_time_nuts(individuals, chain; n_tests::Int, numSeasons::Int, n_years::Int,
-                              process::Symbol=:rw1, se_fixed=nothing, sp_fixed=nothing)
+                              process::Symbol=:rw1, se_fixed=nothing, sp_fixed=nothing,
+                              keep_draws::Bool=false, max_draws::Int=0)
     draws = extract_all_draws(chain; n_tests=n_tests, S=numSeasons, n_years=n_years,
                               process=process, se_fixed=se_fixed, sp_fixed=sp_fixed)
-    n_samps = size(draws.pi1, 2)
+    n_total = size(draws.pi1, 2)
+    # Reconstructing trajectories costs one forward-backward pass per
+    # (badger x draw), so it dominates runtime on a long chain. Thinning to an
+    # evenly spaced subsample keeps the posterior spread while decoupling this
+    # cost from how long the chain was run.
+    keep = max_draws > 0 && max_draws < n_total ?
+           round.(Int, range(1, n_total; length=max_draws)) : collect(1:n_total)
+    n_samps = length(keep)
 
     results = Dict{Int, Vector{Float64}}()
     times = Dict{Int, Vector{Int}}()
+    # Per-draw trajectories, kept only when the caller wants posterior intervals:
+    # this is n_badgers x n_times x n_draws, so it is not free.
+    per_draw = keep_draws ? Dict{Int, Matrix{Float64}}() : nothing
     for b in individuals
         ctrl_b = [Control(t) for t in b.times]
         ey = year_of(minimum(b.times), numSeasons)
         acc = zeros(length(b.times))
-        for i in 1:n_samps
+        mat = keep_draws ? Matrix{Float64}(undef, length(b.times), n_samps) : nothing
+        for (j, i) in enumerate(keep)
             hmm = hmm_for_draw(draws, i, numSeasons, ey)
             gam, _ = forward_backward(hmm, b.obs, ctrl_b)
             acc .+= gam[2, :]
+            keep_draws && (mat[:, j] .= gam[2, :])
         end
         results[b.id] = acc ./ n_samps
         times[b.id] = b.times
+        keep_draws && (per_draw[b.id] = mat)
     end
-    (p_inf=results, times=times)
+    (p_inf=results, times=times, p_inf_draws=per_draw)
+end
+
+# Prevalence for every posterior draw, so the caller can take quantiles.
+# Returns a n_times x n_draws matrix for each estimand.
+function prevalence_draws(individuals, p_inf_draws, times)
+    by_id = Dict(b.id => b for b in individuals)
+    all_times = sort(unique(vcat(values(times)...)))
+    n_draws = size(first(values(p_inf_draws)), 2)
+
+    grid = fill(NaN, length(all_times), n_draws)
+    cap = fill(NaN, length(all_times), n_draws)
+
+    for (ti, t) in enumerate(all_times)
+        gsum = zeros(n_draws); gn = 0
+        csum = zeros(n_draws); cn = 0
+        for (id, tv) in times
+            idx = findfirst(==(t), tv)
+            idx === nothing && continue
+            row = @view p_inf_draws[id][idx, :]
+            gsum .+= row; gn += 1
+            if by_id[id].captured[idx]
+                csum .+= row; cn += 1
+            end
+        end
+        gn > 0 && (grid[ti, :] .= gsum ./ gn)
+        cn > 0 && (cap[ti, :] .= csum ./ cn)
+    end
+
+    (times=all_times, grid=grid, capture=cap)
+end
+
+function quantile_rows(m::Matrix{Float64}, q::Float64)
+    [all(isnan, @view m[i, :]) ? NaN : quantile(collect(skipmissing(@view m[i, :])), q)
+     for i in 1:size(m, 1)]
 end
 
 function prevalence_two_ways(individuals, p_inf, times)
@@ -507,7 +657,10 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                            hazard_sd::Float64=HAZARD_PRIOR_SD,
                              penalty::Bool=true,
                            start_year::Int=0,
-                           repeat_captures::String="stack")
+                           repeat_captures::String="stack",
+                           traj_draws::Int=500,
+                           chain_cache::String="",
+                           reuse_chain::Bool=false)
     Random.seed!(seed)
     # Never mutate the caller's matrix: both the sentinel replacement below and
     # the test masking further down write NaN into it, so a caller reusing one
@@ -589,13 +742,22 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
     ids = [b.id for b in individuals]
 
     result = if method == "nuts"
-        if use_fixed
-            error("NUTS with fixed Se/Sp is not supported in this interface; use MAP or MLE")
-        end
         n_chains = parse(Int, get(ENV, "TEST2INFER_NUTS_CHAINS", "4"))
         backend = n_chains == 1 ? MCMCSerial() : MCMCThreads()
-        chain = sample(model, NUTS(target_acc; adtype=adtype), backend, nuts_samples, n_chains;
-                       progress=false, check_model=false)
+        chain = if reuse_chain && !isempty(chain_cache) && isfile(chain_cache)
+            deserialize(chain_cache)
+        else
+            sample(model, NUTS(target_acc; adtype=adtype), backend, nuts_samples, n_chains;
+                   progress=false, check_model=false)
+        end
+
+        # Cache the chain before any post-processing. Sampling is the expensive,
+        # unrepeatable part; rebuilding trajectories from it is cheap to rerun.
+        # A bug in the latter must never destroy the former.
+        if !isempty(chain_cache) && !(reuse_chain && isfile(chain_cache))
+            mkpath(dirname(chain_cache))
+            serialize(chain_cache, chain)
+        end
 
         p_inf_over_time_data = p_inf_over_time_nuts(individuals, chain;
                                                     n_tests=n_tests,
@@ -603,13 +765,24 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                                                     n_years=n_years,
                                                     process=proc,
                                                     se_fixed=se_fixed_use,
-                                                    sp_fixed=sp_fixed_use)
+                                                    sp_fixed=sp_fixed_use,
+                                                    keep_draws=traj_draws > 0,
+                                                    max_draws=traj_draws)
         prevalence = prevalence_two_ways(individuals, p_inf_over_time_data.p_inf, p_inf_over_time_data.times)
+        pdraws = traj_draws > 0 ?
+                 prevalence_draws(individuals, p_inf_over_time_data.p_inf_draws,
+                                  p_inf_over_time_data.times) :
+                 (grid=fill(NaN, length(prevalence.times), 1),
+                  capture=fill(NaN, length(prevalence.times), 1))
         inf_matrix = create_infection_matrix(p_inf_over_time_data.p_inf, p_inf_over_time_data.times, ids)
         p_inf_last = Dict(b.id => p_inf_over_time_data.p_inf[b.id][findlast(b.captured)] for b in individuals)
 
-        se_est = [mean(vec(chain[@varname(Se[k])])) for k in 1:n_tests]
-        sp_est = [mean(vec(chain[@varname(Sp[k])])) for k in 1:n_tests]
+        # When Se/Sp are fixed the model never samples them, so they are not in
+        # the chain: report the supplied values back.
+        se_est = use_fixed ? copy(se_fixed_use) :
+                 [mean(vec(chain[@varname(Se[k])])) for k in 1:n_tests]
+        sp_est = use_fixed ? copy(sp_fixed_use) :
+                 [mean(vec(chain[@varname(Sp[k])])) for k in 1:n_tests]
         sigma_g_est = mean(vec(chain[@varname(sigma_g)]))
         gamma_raw_est = [mean(vec(chain[@varname(gamma_raw[y])])) for y in 1:n_years]
         rho_est = proc === :ar1 ? mean(vec(chain[@varname(rho)])) : 0.0
@@ -631,6 +804,15 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
          prevalence_grid_total=prevalence.grid_total,
          prevalence_capture_proportion=prevalence.capture_proportion,
          prevalence_capture_total=prevalence.capture_total,
+         prevalence_grid_lower=quantile_rows(pdraws.grid, 0.025),
+         prevalence_grid_upper=quantile_rows(pdraws.grid, 0.975),
+         prevalence_capture_lower=quantile_rows(pdraws.capture, 0.025),
+         prevalence_capture_upper=quantile_rows(pdraws.capture, 0.975),
+         prevalence_grid_draws=pdraws.grid,
+         prevalence_capture_draws=pdraws.capture,
+         trajectory_id=Int[],
+         trajectory_draw=Int[],
+         trajectory_infection_time=Int[],
          ids=ids,
          infection_matrix=inf_matrix.matrix,
          infection_matrix_times=inf_matrix.times,
@@ -667,6 +849,13 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                            sp_fixed=sp_fixed_use)
         p_inf_over_time_data = p_inf_over_time_pointestimate(individuals, P, numSeasons)
         prevalence = prevalence_two_ways(individuals, p_inf_over_time_data.p_inf, p_inf_over_time_data.times)
+        tdraws = traj_draws > 0 ?
+                 prevalence_trajectory_draws(individuals, p_inf_over_time_data.p_inf,
+                                             p_inf_over_time_data.times,
+                                             traj_draws, seed) :
+                 (grid=fill(NaN, length(prevalence.times), 1),
+                  capture=fill(NaN, length(prevalence.times), 1),
+                  infection_id=Int[], infection_draw=Int[], infection_time=Int[])
         inf_matrix = create_infection_matrix(p_inf_over_time_data.p_inf, p_inf_over_time_data.times, ids)
         p_inf_last = Dict(b.id => p_inf_over_time_data.p_inf[b.id][findlast(b.captured)] for b in individuals)
 
@@ -687,6 +876,15 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
          prevalence_grid_total=prevalence.grid_total,
          prevalence_capture_proportion=prevalence.capture_proportion,
          prevalence_capture_total=prevalence.capture_total,
+         prevalence_grid_lower=quantile_rows(tdraws.grid, 0.025),
+         prevalence_grid_upper=quantile_rows(tdraws.grid, 0.975),
+         prevalence_capture_lower=quantile_rows(tdraws.capture, 0.025),
+         prevalence_capture_upper=quantile_rows(tdraws.capture, 0.975),
+         prevalence_grid_draws=tdraws.grid,
+         prevalence_capture_draws=tdraws.capture,
+         trajectory_id=tdraws.infection_id,
+         trajectory_draw=tdraws.infection_draw,
+         trajectory_infection_time=tdraws.infection_time,
          ids=ids,
          infection_matrix=inf_matrix.matrix,
          infection_matrix_times=inf_matrix.times,
