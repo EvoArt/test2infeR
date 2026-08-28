@@ -6,6 +6,11 @@
 #' @param traj_draws Trajectories sampled per badger for prevalence intervals; 0 skips them
 #' @param chain_cache Path to save the NUTS chain to, before post-processing
 #' @param reuse_chain Load the cached chain instead of sampling again
+#' @param ad AD backend for NUTS: "forwarddiff" (default) or "enzyme". Enzyme is
+#'   roughly 1.6x faster but requires the caller to have run
+#'   `JuliaCall::julia_command("using Enzyme;")` first, because
+#'   DifferentiationInterface only wires up its Enzyme extension if Enzyme is
+#'   loaded before it prepares a gradient.
 #' @param target_acc Target acceptance rate for NUTS
 #' @param year_process Year-effect process: `"rw1"` (default), `"iid"`,
 #'   `"rw2"`, `"ar1"`, `"shrunk"` or `"none"`.
@@ -42,6 +47,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
                          traj_draws = 500,
                          chain_cache = NULL,
                          reuse_chain = FALSE,
+                         ad = c("forwarddiff", "enzyme"),
                          hazard_mean = -3.0,
                          hazard_sd = 1.5,
                          penalty = NULL,
@@ -165,6 +171,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
   JuliaCall::julia_assign("j_repeat_captures", repeat_captures)
   JuliaCall::julia_assign("j_traj_draws", as.integer(traj_draws))
   JuliaCall::julia_assign("j_reuse_chain", as.logical(reuse_chain))
+  JuliaCall::julia_assign("j_ad", match.arg(ad))
   JuliaCall::julia_assign("j_chain_cache",
                           if (is.null(chain_cache)) "" else normalizePath(chain_cache, mustWork = FALSE))
   
@@ -178,7 +185,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
     "hazard_mean=j_hazard_mean, hazard_sd=j_hazard_sd, ",
     "penalty=j_penalty, start_year=j_start_year, ",
     "repeat_captures=j_repeat_captures, traj_draws=j_traj_draws, ",
-    "chain_cache=j_chain_cache, reuse_chain=j_reuse_chain",
+    "chain_cache=j_chain_cache, reuse_chain=j_reuse_chain, ad_name=j_ad",
     ");"
   ))
   

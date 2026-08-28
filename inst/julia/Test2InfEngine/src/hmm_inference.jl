@@ -8,7 +8,28 @@ using ADTypes
 const DynamicPPL = Turing.DynamicPPL
 const var"@varname" = DynamicPPL.var"@varname"
 
+# ForwardDiff is the default everywhere. Enzyme is roughly 1.6x faster on the
+# gradient and is available via ad_name="enzyme", but it cannot be the default:
+# this package's precompile workload runs a NUTS fit, and DifferentiationInterface
+# only wires up its Enzyme extension if Enzyme was loaded before it prepared the
+# gradient, so the caller must `using Enzyme` first.
 const adtype = AutoForwardDiff()
+
+# Enzyme is loaded on demand rather than at module load: it is only needed for
+# NUTS, and this package's precompile workload runs a NUTS fit, so importing it
+# unconditionally would drag Enzyme into precompilation.
+#
+# Base.require loads it into a newer world age than this function was compiled
+# in, so its methods are not directly callable here ("method too new to be
+# called from this world context"). invokelatest steps into the current world.
+function ad_backend(name::AbstractString)
+    name == "forwarddiff" && return AutoForwardDiff()
+    name == "enzyme" || error("ad must be \"forwarddiff\" or \"enzyme\"")
+    Enz = Base.require(Base.PkgId(
+        Base.UUID("7da242da-08ed-463a-9acd-ee780be4f1d9"), "Enzyme"))
+    mode = Base.invokelatest(Enz.set_runtime_activity, Enz.Reverse)
+    AutoEnzyme(mode = mode, function_annotation = Enz.Const)
+end
 clamp_prob(x; eps=1e-9) = clamp(x, eps, 1 - eps)
 
 season_of(t::Int, S=4) = (t - 1) % S + 1
@@ -37,9 +58,12 @@ function HiddenMarkovModels.transition_matrix(h::DiagnosticHMM, c::Control)
     return SMatrix{2,2}(1 - lam, zero(lam), lam, one(lam))
 end
 
-struct TBEmission{T} <: Distribution{Multivariate, Discrete}
-    Se       :: Vector{T}
-    Sp       :: Vector{T}
+# Se and Sp carry their own vector types rather than being pinned to Vector:
+# under some AD backends the model's Se/Sp arrive as views, and requiring a
+# concrete Vector here makes construction throw a MethodError.
+struct TBEmission{T,V1<:AbstractVector{T},V2<:AbstractVector{T}} <: Distribution{Multivariate, Discrete}
+    Se       :: V1
+    Sp       :: V2
     infected :: Bool
 end
 
@@ -91,17 +115,63 @@ function HiddenMarkovModels._forward_digest_observation!(
     b1 = exp(logb1 - logm)
     b2 = exp(logb2 - logm)
 
-    a1 = current_state_marginals[1] * b1
-    a2 = current_state_marginals[2] * b2
-    cscale = inv(a1 + a2)
+    # Two-state model, so these indices are always in range. Worth ~24% to
+    # ForwardDiff on this path; nothing to Enzyme.
+    @inbounds begin
+        a1 = current_state_marginals[1] * b1
+        a2 = current_state_marginals[2] * b2
+        cscale = inv(a1 + a2)
 
-    current_state_marginals[1] = a1 * cscale
-    current_state_marginals[2] = a2 * cscale
-    current_obs_likelihoods[1] = b1
-    current_obs_likelihoods[2] = b2
+        current_state_marginals[1] = a1 * cscale
+        current_state_marginals[2] = a2 * cscale
+        current_obs_likelihoods[1] = b1
+        current_obs_likelihoods[2] = b2
+    end
 
     logL = -log(cscale) + logm
     return cscale, logL
+end
+
+# Hand-rolled forward pass for one badger.
+#
+# This replaces `logdensityof(::DiagnosticHMM, ...)` in the model. It computes
+# exactly the same quantity (verified bit-identical), but carries two scalars
+# through the recursion instead of going via HiddenMarkovModels: that library
+# calls `obs_distributions` once per timepoint, which builds two `TBEmission`
+# structs holding vector references, so it cannot stack-allocate them (~2 MB of
+# garbage per log-density call). Measured on the real data: 11.7ms per gradient
+# against 57.6ms, both under Enzyme. See gridded/HMM_PERFORMANCE.md.
+#
+# The DiagnosticHMM path is kept because the posterior-decoding code
+# (forward_backward) still uses it; only the likelihood is replaced.
+function seq_loglik(obs, times, pi1, alpha, gamma, Se, Sp, S::Int)
+    T = eltype(alpha)
+    aU = one(T) - pi1
+    aI = pi1
+    ll = zero(T)
+    K = length(Se)
+    @inbounds for j in eachindex(times)
+        if j > 1
+            t = times[j]
+            lam = clamp_prob(logistic(alpha[season_of(t, S)] + gamma[year_of(t, S)]))
+            aI = aI + aU * lam
+            aU = aU * (one(T) - lam)
+        end
+        o = obs[j]
+        bU = one(T); bI = one(T)
+        for k in eachindex(o)
+            v = o[k]
+            isnan(v) && continue
+            kk = mod1(k, K)
+            bU *= v == 1.0 ? (one(T) - Sp[kk]) : Sp[kk]
+            bI *= v == 1.0 ? Se[kk] : (one(T) - Se[kk])
+        end
+        aU *= bU; aI *= bI
+        c = aU + aI
+        ll += log(c)
+        aU /= c; aI /= c
+    end
+    return ll
 end
 
 const SE_FIXED_DEFAULT = [0.407, 0.407, 0.100, 0.650, 0.809, 0.492]
@@ -170,7 +240,7 @@ sigma_prior(process::Symbol) =
                           truncated(Normal(0, 0.30); lower=0)
 
 @model function hmm_model(obs_seq, ctrl_seq, seq_ends, S, n_years, se_priors, sp_priors,
-                          entry_year;
+                          entry_year, times_seq;
                           process::Symbol=:rw1,
                           hazard_mean::Float64=HAZARD_PRIOR_MEAN,
                           hazard_sd::Float64=HAZARD_PRIOR_SD,
@@ -214,8 +284,8 @@ sigma_prior(process::Symbol) =
     ll = zero(eltype(alpha))
     start = 1
     for (i, e) in enumerate(seq_ends)
-        hmm_i = DiagnosticHMM(pi1_vec[entry_year[i]], alpha, gamma, Se, Sp, S)
-        ll += logdensityof(hmm_i, view(obs_seq, start:e), view(ctrl_seq, start:e))
+        ll += seq_loglik(view(obs_seq, start:e), view(times_seq, start:e),
+                         pi1_vec[entry_year[i]], alpha, gamma, Se, Sp, S)
         start = e + 1
     end
     Turing.@addlogprob! ll
@@ -558,6 +628,23 @@ function prevalence_draws(individuals, p_inf_draws, times)
     (times=all_times, grid=grid, capture=cap)
 end
 
+# Infection time per (badger, draw) for the NUTS path. Each draw's trajectory is
+# already a full path, so the infection time is the first timepoint at which it
+# crosses one half; 0 means never, within that badger's record.
+function infection_times_from_draws(individuals, p_inf_draws, times)
+    ids = Int[]; draws = Int[]; tms = Int[]
+    for b in individuals
+        m = p_inf_draws[b.id]
+        tv = times[b.id]
+        for r in 1:size(m, 2)
+            k = findfirst(>=(0.5), @view m[:, r])
+            push!(ids, b.id); push!(draws, r)
+            push!(tms, k === nothing ? 0 : tv[k])
+        end
+    end
+    (id=ids, draw=draws, time=tms)
+end
+
 function quantile_rows(m::Matrix{Float64}, q::Float64)
     [all(isnan, @view m[i, :]) ? NaN : quantile(collect(skipmissing(@view m[i, :])), q)
      for i in 1:size(m, 1)]
@@ -660,7 +747,8 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                            repeat_captures::String="stack",
                            traj_draws::Int=500,
                            chain_cache::String="",
-                           reuse_chain::Bool=false)
+                           reuse_chain::Bool=false,
+                           ad_name::String="")
     Random.seed!(seed)
     # Never mutate the caller's matrix: both the sentinel replacement below and
     # the test masking further down write NaN into it, so a caller reusing one
@@ -730,8 +818,11 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
 
     obs_seq, ctrl_seq, seq_ends = pack_sequences(individuals)
     entry_year = [year_of(minimum(b.times), numSeasons) for b in individuals]
+    # The hand-rolled likelihood indexes timepoints directly rather than going
+    # through Control structs.
+    times_seq = [c.t for c in ctrl_seq]
     model = hmm_model(obs_seq, ctrl_seq, seq_ends, numSeasons, n_years, se_priors, sp_priors,
-                      entry_year;
+                      entry_year, times_seq;
                       process=proc,
                       hazard_mean=hazard_mean,
                       hazard_sd=hazard_sd,
@@ -742,12 +833,15 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
     ids = [b.id for b in individuals]
 
     result = if method == "nuts"
+        # Enzyme reverse unless told otherwise: measured ~1.6x faster than
+        # ForwardDiff on the gradient, which is what NUTS pays for repeatedly.
+        ad = ad_backend(isempty(ad_name) ? "forwarddiff" : ad_name)
         n_chains = parse(Int, get(ENV, "TEST2INFER_NUTS_CHAINS", "4"))
         backend = n_chains == 1 ? MCMCSerial() : MCMCThreads()
         chain = if reuse_chain && !isempty(chain_cache) && isfile(chain_cache)
             deserialize(chain_cache)
         else
-            sample(model, NUTS(target_acc; adtype=adtype), backend, nuts_samples, n_chains;
+            sample(model, NUTS(target_acc; adtype=ad), backend, nuts_samples, n_chains;
                    progress=false, check_model=false)
         end
 
@@ -769,6 +863,11 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
                                                     keep_draws=traj_draws > 0,
                                                     max_draws=traj_draws)
         prevalence = prevalence_two_ways(individuals, p_inf_over_time_data.p_inf, p_inf_over_time_data.times)
+        ntraj = traj_draws > 0 ?
+                infection_times_from_draws(individuals,
+                                           p_inf_over_time_data.p_inf_draws,
+                                           p_inf_over_time_data.times) :
+                (id=Int[], draw=Int[], time=Int[])
         pdraws = traj_draws > 0 ?
                  prevalence_draws(individuals, p_inf_over_time_data.p_inf_draws,
                                   p_inf_over_time_data.times) :
@@ -810,9 +909,9 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
          prevalence_capture_upper=quantile_rows(pdraws.capture, 0.975),
          prevalence_grid_draws=pdraws.grid,
          prevalence_capture_draws=pdraws.capture,
-         trajectory_id=Int[],
-         trajectory_draw=Int[],
-         trajectory_infection_time=Int[],
+         trajectory_id=ntraj.id,
+         trajectory_draw=ntraj.draw,
+         trajectory_infection_time=ntraj.time,
          ids=ids,
          infection_matrix=inf_matrix.matrix,
          infection_matrix_times=inf_matrix.times,

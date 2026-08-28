@@ -100,13 +100,21 @@ test_that("test names are rejected -- tests are positional", {
   )
 })
 
-test_that("NUTS with fixed Se/Sp is rejected in R, before Julia runs", {
+test_that("NUTS runs with fixed Se/Sp", {
+  # This used to be rejected outright. The only real obstacle was that the
+  # post-processing read Se/Sp out of the chain, where fixed values are never
+  # sampled; it now reports the supplied values instead.
+  skip_on_cran()
+  skip_without_engine()
   se_fix <- c(0.407, 0.407, 0.100, 0.650, 0.809, 0.492)
   sp_fix <- c(0.943, 0.943, 0.999, 0.943, 0.936, 0.931)
-  expect_error(
-    hmm_inference(matrix(0, 4, 6), method = "nuts", se_fixed = se_fix, sp_fixed = sp_fix),
-    "not supported"
-  )
+  d <- simulate_test_data(n_individuals = 12, n_periods = 2, seed = 13)
+  test_mat <- as.matrix(d[, c("time", "id", "group", paste0("test_", 1:6))])
+  fit <- hmm_inference(test_mat, method = "nuts", nuts_samples = 30, seed = 321,
+                       se_fixed = se_fix, sp_fixed = sp_fix)
+  expect_gt(nrow(fit$individual), 0)
+  expect_equal(fit$sesp$Se, se_fix, tolerance = 1e-8)
+  expect_equal(fit$sesp$Sp, sp_fix, tolerance = 1e-8)
 })
 
 test_that("repeat captures in one time-step are stacked by default", {
