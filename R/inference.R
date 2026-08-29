@@ -6,11 +6,11 @@
 #' @param traj_draws Trajectories sampled per badger for prevalence intervals; 0 skips them
 #' @param chain_cache Path to save the NUTS chain to, before post-processing
 #' @param reuse_chain Load the cached chain instead of sampling again
-#' @param ad AD backend for NUTS: "forwarddiff" (default) or "enzyme". Enzyme is
-#'   roughly 1.6x faster but requires the caller to have run
-#'   `JuliaCall::julia_command("using Enzyme;")` first, because
-#'   DifferentiationInterface only wires up its Enzyme extension if Enzyme is
-#'   loaded before it prepares a gradient.
+#' @param ad AD backend for NUTS: "forwarddiff" (default) or "mooncake".
+#'   Mooncake is roughly 3x faster on the gradient but requires the caller to
+#'   have run `JuliaCall::julia_command("using Mooncake;")` first, because
+#'   DifferentiationInterface only wires up its Mooncake extension if Mooncake
+#'   is loaded before it prepares a gradient.
 #' @param target_acc Target acceptance rate for NUTS
 #' @param year_process Year-effect process: `"rw1"` (default), `"iid"`,
 #'   `"rw2"`, `"ar1"`, `"shrunk"` or `"none"`.
@@ -47,7 +47,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
                          traj_draws = 500,
                          chain_cache = NULL,
                          reuse_chain = FALSE,
-                         ad = c("forwarddiff", "enzyme"),
+                         ad = c("forwarddiff", "mooncake"),
                          hazard_mean = -3.0,
                          hazard_sd = 1.5,
                          penalty = NULL,

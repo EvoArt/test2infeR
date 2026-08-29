@@ -8,28 +8,33 @@ using ADTypes
 const DynamicPPL = Turing.DynamicPPL
 const var"@varname" = DynamicPPL.var"@varname"
 
-# ForwardDiff is the default everywhere. Enzyme is roughly 1.6x faster on the
-# gradient and is available via ad_name="enzyme", but it cannot be the default:
-# this package's precompile workload runs a NUTS fit, and DifferentiationInterface
-# only wires up its Enzyme extension if Enzyme was loaded before it prepared the
-# gradient, so the caller must `using Enzyme` first.
+# ForwardDiff is the default everywhere. Mooncake is available for NUTS via
+# ad_name="mooncake" and is roughly 3x faster on the gradient, but it cannot be
+# the default: this package's precompile workload runs a NUTS fit, and
+# DifferentiationInterface only wires up its Mooncake extension if Mooncake was
+# loaded before the gradient was prepared, so the caller must load it first.
 const adtype = AutoForwardDiff()
 
-# Enzyme is loaded on demand rather than at module load: it is only needed for
-# NUTS, and this package's precompile workload runs a NUTS fit, so importing it
-# unconditionally would drag Enzyme into precompilation.
+# The reverse-mode engine is loaded on demand rather than at module load: it is
+# only needed for NUTS, and this package's precompile workload runs a NUTS fit,
+# so importing it unconditionally would drag it into precompilation and slow
+# every `using` of this package.
 #
 # Base.require loads it into a newer world age than this function was compiled
 # in, so its methods are not directly callable here ("method too new to be
 # called from this world context"). invokelatest steps into the current world.
 function ad_backend(name::AbstractString)
     name == "forwarddiff" && return AutoForwardDiff()
-    name == "enzyme" || error("ad must be \"forwarddiff\" or \"enzyme\"")
-    Enz = Base.require(Base.PkgId(
-        Base.UUID("7da242da-08ed-463a-9acd-ee780be4f1d9"), "Enzyme"))
-    mode = Base.invokelatest(Enz.set_runtime_activity, Enz.Reverse)
-    AutoEnzyme(mode = mode, function_annotation = Enz.Const)
+    name == "mooncake" || error("ad must be \"forwarddiff\" or \"mooncake\"")
+    # One forward-mode and one reverse-mode engine only, so `using` stays fast.
+    # Mooncake is the reverse choice: on the compacted likelihood it is the
+    # fastest backend measured (6.1ms per gradient against Enzyme's 13.2ms and
+    # ForwardDiff's 19.8ms). See gridded/HMM_PERFORMANCE.md.
+    Base.require(Base.PkgId(
+        Base.UUID("da2b9cff-9c12-43a0-ae48-6db2b0edb7d6"), "Mooncake"))
+    AutoMooncake(; config=nothing)
 end
+
 clamp_prob(x; eps=1e-9) = clamp(x, eps, 1 - eps)
 
 season_of(t::Int, S=4) = (t - 1) % S + 1
@@ -144,32 +149,76 @@ end
 #
 # The DiagnosticHMM path is kept because the posterior-decoding code
 # (forward_backward) still uses it; only the likelihood is replaced.
-function seq_loglik(obs, times, pi1, alpha, gamma, Se, Sp, S::Int)
+# Compacted observations: 79% of the observation cells on this grid are NaN and
+# 51% of timepoints hold no test at all, so testing isnan per cell spends four
+# fifths of the emission loop doing nothing, on a data-dependent branch.
+#
+# Flattening once, up front, into
+#   vals[p] - the 0/1 result       tidx[p] - which test it belongs to
+#   ptr[j]  - where timepoint j's results start
+# turns the inner loop into a straight run over only the results that exist. An
+# empty timepoint becomes an empty range and costs nothing beyond the state
+# update.
+function compact_observations(obs_seq, n_tests::Int)
+    ptr = Vector{Int}(undef, length(obs_seq) + 1)
+    vals = Int8[]; tidx = Int32[]
+    ptr[1] = 1
+    for (j, o) in enumerate(obs_seq)
+        for k in eachindex(o)
+            v = o[k]
+            isnan(v) && continue
+            push!(vals, v == 1 ? Int8(1) : Int8(0))
+            push!(tidx, Int32(mod1(k, n_tests)))
+        end
+        ptr[j+1] = length(vals) + 1
+    end
+    (ptr=ptr, vals=vals, tidx=tidx)
+end
+
+# Hand-rolled forward pass for one badger.
+#
+# Replaces `logdensityof(::DiagnosticHMM, ...)` in the model. Same quantity
+# (verified bit-identical), but two scalars through the recursion instead of
+# going via HiddenMarkovModels, which calls obs_distributions once per timepoint
+# and builds two TBEmission structs holding vector references (~2 MB of garbage
+# per log-density call).
+#
+# Measured on the real data, gradient: 57.6ms via HiddenMarkovModels, 11.7ms
+# scalar, 6.1ms with compacted observations. See gridded/HMM_PERFORMANCE.md.
+#
+# The DiagnosticHMM path is kept: forward_backward still uses it for posterior
+# decoding. Only the likelihood is replaced.
+function seq_loglik(ptr, vals, tidx, times, pi1, alpha, gamma, Se, Sp, S::Int)
+    n = length(times)
     T = eltype(alpha)
     aU = one(T) - pi1
     aI = pi1
     ll = zero(T)
-    K = length(Se)
-    @inbounds for j in eachindex(times)
+    @inbounds for j in 1:n
         if j > 1
             t = times[j]
             lam = clamp_prob(logistic(alpha[season_of(t, S)] + gamma[year_of(t, S)]))
             aI = aI + aU * lam
             aU = aU * (one(T) - lam)
         end
-        o = obs[j]
-        bU = one(T); bI = one(T)
-        for k in eachindex(o)
-            v = o[k]
-            isnan(v) && continue
-            kk = mod1(k, K)
-            bU *= v == 1.0 ? (one(T) - Sp[kk]) : Sp[kk]
-            bI *= v == 1.0 ? Se[kk] : (one(T) - Se[kk])
+        lo = ptr[j]; hi = ptr[j+1] - 1
+        if hi >= lo
+            bU = one(T); bI = one(T)
+            for p in lo:hi
+                k = tidx[p]
+                if vals[p] == 1
+                    bU *= one(T) - Sp[k]
+                    bI *= Se[k]
+                else
+                    bU *= Sp[k]
+                    bI *= one(T) - Se[k]
+                end
+            end
+            aU *= bU; aI *= bI
+            c = aU + aI
+            ll += log(c)
+            aU /= c; aI /= c
         end
-        aU *= bU; aI *= bI
-        c = aU + aI
-        ll += log(c)
-        aU /= c; aI /= c
     end
     return ll
 end
@@ -240,7 +289,7 @@ sigma_prior(process::Symbol) =
                           truncated(Normal(0, 0.30); lower=0)
 
 @model function hmm_model(obs_seq, ctrl_seq, seq_ends, S, n_years, se_priors, sp_priors,
-                          entry_year, times_seq;
+                          entry_year, times_seq, obs_ptr, obs_vals, obs_tidx;
                           process::Symbol=:rw1,
                           hazard_mean::Float64=HAZARD_PRIOR_MEAN,
                           hazard_sd::Float64=HAZARD_PRIOR_SD,
@@ -284,7 +333,8 @@ sigma_prior(process::Symbol) =
     ll = zero(eltype(alpha))
     start = 1
     for (i, e) in enumerate(seq_ends)
-        ll += seq_loglik(view(obs_seq, start:e), view(times_seq, start:e),
+        ll += seq_loglik(view(obs_ptr, start:(e+1)), obs_vals, obs_tidx,
+                         view(times_seq, start:e),
                          pi1_vec[entry_year[i]], alpha, gamma, Se, Sp, S)
         start = e + 1
     end
@@ -821,8 +871,9 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
     # The hand-rolled likelihood indexes timepoints directly rather than going
     # through Control structs.
     times_seq = [c.t for c in ctrl_seq]
+    cobs = compact_observations(obs_seq, n_tests)
     model = hmm_model(obs_seq, ctrl_seq, seq_ends, numSeasons, n_years, se_priors, sp_priors,
-                      entry_year, times_seq;
+                      entry_year, times_seq, cobs.ptr, cobs.vals, cobs.tidx;
                       process=proc,
                       hazard_mean=hazard_mean,
                       hazard_sd=hazard_sd,
@@ -833,8 +884,8 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
     ids = [b.id for b in individuals]
 
     result = if method == "nuts"
-        # Enzyme reverse unless told otherwise: measured ~1.6x faster than
-        # ForwardDiff on the gradient, which is what NUTS pays for repeatedly.
+        # ForwardDiff unless told otherwise; pass ad_name="mooncake" for the
+        # faster reverse-mode path, having loaded Mooncake first.
         ad = ad_backend(isempty(ad_name) ? "forwarddiff" : ad_name)
         n_chains = parse(Int, get(ENV, "TEST2INFER_NUTS_CHAINS", "4"))
         backend = n_chains == 1 ? MCMCSerial() : MCMCThreads()
