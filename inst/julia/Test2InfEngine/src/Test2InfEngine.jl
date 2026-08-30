@@ -50,15 +50,12 @@ using PrecompileTools: @setup_workload, @compile_workload
         run_hmm_inference(copy(test_mat), "map", 2, 0.8, 1)
         run_hmm_inference(copy(test_mat), "mle", 2, 0.8, 1)
         run_hmm_inference(copy(test_mat), "nuts", 2, 0.8, 1)
-        # The reverse-mode path, compiled here rather than on the first real
-        # call of every session. Mooncake is a full dependency and is loaded at
-        # module load, so DifferentiationInterface's Mooncake extension is
-        # already wired up by the time this prepares a gradient -- which is the
-        # whole reason the dependency is not lazy.
-        #
-        # This is the expensive one to JIT: building the Mooncake tape for the
-        # HMM forward pass dominates the first Mooncake fit in a fresh session.
-        run_hmm_inference(copy(test_mat), "nuts", 2, 0.8, 1; ad_name="mooncake")
+        # NO Mooncake fit here, deliberately. Mooncake's rules are
+        # MistyClosure{OpaqueClosure} values, which cannot be serialized into a
+        # .ji cache. Running a Mooncake fit in this workload does not cache
+        # anything -- it just re-executes on every `using`, taking load time
+        # from 17 s to 258 s. The tape has to be built per process whatever we
+        # do here, so it is built once, lazily, on the first fit that needs it.
     end
 
     if prev_chains === nothing
