@@ -602,6 +602,11 @@ function extract_all_draws(chain; n_tests::Int, S::Int, n_years::Int,
     DrawArrays(pi1, alpha, gamma, Se, Sp)
 end
 
+# How many draws the posterior-mean p_inf is averaged over when the caller has
+# asked for no per-draw trajectory output. Bounded so that this cost does not
+# grow with chain length; see the note in p_inf_over_time_nuts.
+const DEFAULT_MEAN_DRAWS = 200
+
 @inline function hmm_for_draw(d::DrawArrays, i::Int, S::Int, entry_year::Int)
     DiagnosticHMM(d.pi1[entry_year, i], d.alpha[:, i], d.gamma[:, i],
                   d.Se[:, i], d.Sp[:, i], S)
@@ -617,8 +622,11 @@ function p_inf_over_time_nuts(individuals, chain; n_tests::Int, numSeasons::Int,
     # (badger x draw), so it dominates runtime on a long chain. Thinning to an
     # evenly spaced subsample keeps the posterior spread while decoupling this
     # cost from how long the chain was run.
-    keep = max_draws > 0 && max_draws < n_total ?
-           round.(Int, range(1, n_total; length=max_draws)) : collect(1:n_total)
+    # max_draws == 0 asks for no per-draw output, but the mean p_inf is still
+    # needed, so it is averaged over a bounded subsample rather than every draw.
+    n_keep = max_draws > 0 ? max_draws : DEFAULT_MEAN_DRAWS
+    keep = n_keep < n_total ?
+           round.(Int, range(1, n_total; length=n_keep)) : collect(1:n_total)
     n_samps = length(keep)
 
     results = Dict{Int, Vector{Float64}}()
