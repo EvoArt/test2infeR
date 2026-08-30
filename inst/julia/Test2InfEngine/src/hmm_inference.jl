@@ -4,34 +4,29 @@ using LogExpFunctions: logistic, log1pexp
 using Random, Statistics, LinearAlgebra
 using Serialization: serialize, deserialize
 using ADTypes
+# Mooncake is a full dependency and is loaded HERE, at module load, not lazily
+# via Base.require. That is what lets the precompile workload build a Mooncake
+# gradient: DifferentiationInterface only wires up its Mooncake extension if
+# Mooncake was loaded before the gradient is prepared, so loading it up front is
+# the requirement for precompiling the reverse-mode path, not an obstacle to it.
+#
+# One forward-mode and one reverse-mode engine only, so `using` stays bounded.
+# Mooncake is the reverse choice: on the compacted likelihood it is the fastest
+# backend measured (6.1ms per gradient against Enzyme's 13.2ms and ForwardDiff's
+# 19.8ms). See gridded/HMM_PERFORMANCE.md.
+using Mooncake
 
 const DynamicPPL = Turing.DynamicPPL
 const var"@varname" = DynamicPPL.var"@varname"
 
-# ForwardDiff is the default everywhere. Mooncake is available for NUTS via
-# ad_name="mooncake" and is roughly 3x faster on the gradient, but it cannot be
-# the default: this package's precompile workload runs a NUTS fit, and
-# DifferentiationInterface only wires up its Mooncake extension if Mooncake was
-# loaded before the gradient was prepared, so the caller must load it first.
+# ForwardDiff remains the default for MAP/MLE, where the problem is small and
+# forward mode wins. NUTS/HMC should be asked for "mooncake": it is ~3x faster
+# on the gradient at this parameter count.
 const adtype = AutoForwardDiff()
 
-# The reverse-mode engine is loaded on demand rather than at module load: it is
-# only needed for NUTS, and this package's precompile workload runs a NUTS fit,
-# so importing it unconditionally would drag it into precompilation and slow
-# every `using` of this package.
-#
-# Base.require loads it into a newer world age than this function was compiled
-# in, so its methods are not directly callable here ("method too new to be
-# called from this world context"). invokelatest steps into the current world.
 function ad_backend(name::AbstractString)
     name == "forwarddiff" && return AutoForwardDiff()
     name == "mooncake" || error("ad must be \"forwarddiff\" or \"mooncake\"")
-    # One forward-mode and one reverse-mode engine only, so `using` stays fast.
-    # Mooncake is the reverse choice: on the compacted likelihood it is the
-    # fastest backend measured (6.1ms per gradient against Enzyme's 13.2ms and
-    # ForwardDiff's 19.8ms). See gridded/HMM_PERFORMANCE.md.
-    Base.require(Base.PkgId(
-        Base.UUID("da2b9cff-9c12-43a0-ae48-6db2b0edb7d6"), "Mooncake"))
     AutoMooncake(; config=nothing)
 end
 
@@ -872,7 +867,25 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
     # through Control structs.
     times_seq = [c.t for c in ctrl_seq]
     cobs = compact_observations(obs_seq, n_tests)
-    model = hmm_model(obs_seq, ctrl_seq, seq_ends, numSeasons, n_years, se_priors, sp_priors,
+    # `obs_seq`/`ctrl_seq` are NOT passed to the model: since the compaction the
+    # likelihood reads the CSR arrays (ptr/vals/tidx) and the model body never
+    # touches them. Handing them over anyway costs 48.8x on the gradient.
+    #
+    # `obs_seq` is a Vector{Vector{Float64}} with one inner vector per capture
+    # (29,737 on the real cohort). Mooncake builds a tangent for EVERY inner
+    # vector and zeroes the whole structure before each reverse sweep, so
+    # `set_to_zero_maybe!!` alone was 98.9% of gradient time. Measured, full
+    # cohort, rw1, Se/Sp fixed:
+    #
+    #   with    obs_seq   primal 2.30 ms   gradient 509.5 ms   ratio 221.6x
+    #   without obs_seq   primal 2.30 ms   gradient  10.4 ms   ratio   4.6x
+    #
+    # 4.6x is a normal reverse-mode ratio; 221x was this dead argument. It also
+    # explains why the gradient appeared to scale quadratically in cohort size
+    # while the primal stayed linear: the tangent structure grows with the data.
+    #
+    # Empty stand-ins keep the model's arity and its `@model` signature intact.
+    model = hmm_model(Vector{Float64}[], Control[], seq_ends, numSeasons, n_years, se_priors, sp_priors,
                       entry_year, times_seq, cobs.ptr, cobs.vals, cobs.tidx;
                       process=proc,
                       hazard_mean=hazard_mean,
@@ -883,14 +896,38 @@ function run_hmm_inference(test_mat::Matrix{Float64}, method::String,
 
     ids = [b.id for b in individuals]
 
-    result = if method == "nuts"
+    result = if method == "nuts" || method == "hmc"
         # ForwardDiff unless told otherwise; pass ad_name="mooncake" for the
         # faster reverse-mode path, having loaded Mooncake first.
         ad = ad_backend(isempty(ad_name) ? "forwarddiff" : ad_name)
         n_chains = parse(Int, get(ENV, "TEST2INFER_NUTS_CHAINS", "4"))
         backend = n_chains == 1 ? MCMCSerial() : MCMCThreads()
+        # method="hmc" asks for the pre-tuned fast path: fixed-L HMC under a
+        # dense metric adapted offline for this exact variant. Opt-in, because
+        # the constants are specific to the five sql-e2e variants AND to the
+        # cohort they were tuned on -- wrong data under a fixed metric samples
+        # badly rather than failing. No match => fall back to NUTS.
+        pretuned = nothing
+        perm = nothing
+        if method == "hmc"
+            variant = fastpath_variant(test_mask, !use_fixed)
+            if variant !== nothing
+                D = length(DynamicPPL.link!!(DynamicPPL.VarInfo(model), model)[:])
+                pretuned = fastpath_pretuned(variant, D, proc)
+                if pretuned !== nothing
+                    perm = fastpath_permutation(model, n_years, numSeasons, !use_fixed)
+                    perm === nothing && (pretuned = nothing)
+                end
+            end
+            pretuned === nothing &&
+                @info "no pre-tuned constants match this model; using NUTS"
+        end
+
         chain = if reuse_chain && !isempty(chain_cache) && isfile(chain_cache)
             deserialize(chain_cache)
+        elseif pretuned !== nothing
+            fastpath_sample(model, pretuned, perm, nuts_samples,
+                            min(200, nuts_samples), n_chains, seed, ad)
         else
             sample(model, NUTS(target_acc; adtype=ad), backend, nuts_samples, n_chains;
                    progress=false, check_model=false)

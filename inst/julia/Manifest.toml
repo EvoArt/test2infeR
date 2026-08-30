@@ -2,7 +2,7 @@
 
 julia_version = "1.10.9"
 manifest_format = "2.0"
-project_hash = "ef47d8925a7119466ed48a4e11e1d7812b5db4c0"
+project_hash = "ad6231bbe308a4db7a0221011435f23be676fc32"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "5970c86505ae9c07bf5bc521ef2bbbb3849e8b7b"
@@ -49,6 +49,7 @@ deps = ["ADTypes", "AbstractMCMC", "Accessors", "BangBang", "DensityInterface", 
 git-tree-sha1 = "31fb177c9952267ac2dc54a44868cb768390e6ef"
 uuid = "7a57a42e-76ec-4ea3-a279-07e840d6d9cf"
 version = "0.15.5"
+weakdeps = ["DiffResults", "DifferentiationInterface", "Distributions", "ForwardDiff", "Mooncake", "Test"]
 
     [deps.AbstractPPL.extensions]
     AbstractPPLDifferentiationInterfaceExt = ["DifferentiationInterface"]
@@ -56,14 +57,6 @@ version = "0.15.5"
     AbstractPPLForwardDiffExt = ["ForwardDiff", "DiffResults"]
     AbstractPPLMooncakeExt = ["Mooncake"]
     AbstractPPLTestExt = ["Test"]
-
-    [deps.AbstractPPL.weakdeps]
-    DiffResults = "163ba53b-c6d8-5494-b064-1a9d43ac40c5"
-    DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
-    Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
-    ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
-    Mooncake = "da2b9cff-9c12-43a0-ae48-6db2b0edb7d6"
-    Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [[deps.AbstractTrees]]
 git-tree-sha1 = "2d9c9a55f9c93e8887ad391fbae72f8ef55e1177"
@@ -487,6 +480,20 @@ version = "0.30.1"
     SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
     StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 
+[[deps.DispatchDoctor]]
+deps = ["MacroTools", "Preferences"]
+git-tree-sha1 = "42cd00edaac86f941815fe557c1d01e11913e07c"
+uuid = "8d63f2c5-f18a-4cf2-ba9d-b3f60fc568c8"
+version = "0.4.28"
+
+    [deps.DispatchDoctor.extensions]
+    DispatchDoctorChainRulesCoreExt = "ChainRulesCore"
+    DispatchDoctorEnzymeCoreExt = "EnzymeCore"
+
+    [deps.DispatchDoctor.weakdeps]
+    ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+    EnzymeCore = "f151be2c-9106-41f4-ab19-57ee4f262869"
+
 [[deps.Distributed]]
 deps = ["Random", "Serialization", "Sockets"]
 uuid = "8ba89e20-285c-5b6f-9357-94700520ee1b"
@@ -894,6 +901,54 @@ version = "2.1.0"
 
 [[deps.Mmap]]
 uuid = "a63ad114-7e13-5084-954f-fe012c677804"
+
+[[deps.Mooncake]]
+deps = ["ADTypes", "ChainRulesCore", "DispatchDoctor", "ExprTools", "LinearAlgebra", "MistyClosures", "PrecompileTools", "Random", "Test"]
+git-tree-sha1 = "80e723c93202784005852b36d5ea22e68acefa50"
+uuid = "da2b9cff-9c12-43a0-ae48-6db2b0edb7d6"
+version = "0.5.49"
+
+    [deps.Mooncake.extensions]
+    MooncakeAllocCheckExt = "AllocCheck"
+    MooncakeBFloat16sExt = "BFloat16s"
+    MooncakeCUDAExt = ["CUDA", "Statistics"]
+    MooncakeChainRulesExt = "ChainRules"
+    MooncakeDistancesExt = "Distances"
+    MooncakeDistributionsCUDAExt = ["CUDA", "Distributions"]
+    MooncakeDistributionsExt = "Distributions"
+    MooncakeDynamicExpressionsExt = "DynamicExpressions"
+    MooncakeFluxExt = "Flux"
+    MooncakeFunctionWrappersExt = "FunctionWrappers"
+    MooncakeJETExt = "JET"
+    MooncakeLogExpFunctionsExt = "LogExpFunctions"
+    MooncakeLuxLibExt = ["LuxLib", "MLDataDevices", "Static"]
+    MooncakeLuxLibNNlibExt = ["LuxLib", "NNlib"]
+    MooncakeLuxLibSLEEFPiratesExtension = ["LuxLib", "SLEEFPirates"]
+    MooncakeNNlibExt = ["NNlib", "LinearAlgebra"]
+    MooncakeSpecialFunctionsExt = "SpecialFunctions"
+    MooncakecuDNNExt = ["CUDA", "cuDNN"]
+
+    [deps.Mooncake.weakdeps]
+    AllocCheck = "9b6a8646-10ed-4001-bbdc-1d2f46dfbb1a"
+    BFloat16s = "ab4f0b2a-ad5b-11e8-123f-65d77653426b"
+    CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+    ChainRules = "082447d4-558c-5d27-93f4-14fc19e9eca2"
+    Distances = "b4f34e82-e78d-54a5-968a-f98e89d6e8f7"
+    Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
+    DynamicExpressions = "a40a106e-89c9-4ca8-8020-a735e8728b6b"
+    Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
+    FunctionWrappers = "069b7b12-0de2-55c6-9aab-29f3d0a68a2e"
+    GPUArraysCore = "46192b85-c4d5-4398-a991-12ede77f4527"
+    JET = "c3a54625-cd67-489e-a8e7-0a5a0ff4e31b"
+    LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
+    LuxLib = "82251201-b29d-42c6-8e01-566dec8acb11"
+    MLDataDevices = "7e8f7934-dd98-4c1a-8fe8-92b47a384d40"
+    NNlib = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"
+    SLEEFPirates = "476501e8-09a2-5ece-8869-fb82de89a1fa"
+    SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
+    Static = "aedffcd0-7271-4cad-89d0-dc628f76c6d3"
+    Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+    cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
 
 [[deps.NLSolversBase]]
 deps = ["ADTypes", "DifferentiationInterface", "FiniteDiff", "LinearAlgebra"]
@@ -1499,7 +1554,7 @@ deps = ["InteractiveUtils", "Logging", "Random", "Serialization"]
 uuid = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [[deps.Test2InfEngine]]
-deps = ["ADTypes", "DensityInterface", "Distributions", "ForwardDiff", "HiddenMarkovModels", "LinearAlgebra", "LogExpFunctions", "PrecompileTools", "Random", "StaticArrays", "Statistics", "Turing"]
+deps = ["ADTypes", "DensityInterface", "Distributions", "ForwardDiff", "HiddenMarkovModels", "LinearAlgebra", "LogExpFunctions", "Mooncake", "PrecompileTools", "Random", "Serialization", "StaticArrays", "Statistics", "Turing"]
 path = "Test2InfEngine"
 uuid = "a3fc1737-8192-4d28-a55a-60f3621df0e2"
 version = "0.1.0"

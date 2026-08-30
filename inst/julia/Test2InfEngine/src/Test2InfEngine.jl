@@ -18,6 +18,9 @@ module Test2InfEngine
 export run_hmm_inference
 
 include("hmm_inference.jl")
+# Pre-tuned dense HMC constants for the five sql-e2e bundle variants, plus the
+# variant lookup. Data and dispatch only, no AD dependency.
+include("fastpath.jl")
 
 using PrecompileTools: @setup_workload, @compile_workload
 
@@ -47,6 +50,15 @@ using PrecompileTools: @setup_workload, @compile_workload
         run_hmm_inference(copy(test_mat), "map", 2, 0.8, 1)
         run_hmm_inference(copy(test_mat), "mle", 2, 0.8, 1)
         run_hmm_inference(copy(test_mat), "nuts", 2, 0.8, 1)
+        # The reverse-mode path, compiled here rather than on the first real
+        # call of every session. Mooncake is a full dependency and is loaded at
+        # module load, so DifferentiationInterface's Mooncake extension is
+        # already wired up by the time this prepares a gradient -- which is the
+        # whole reason the dependency is not lazy.
+        #
+        # This is the expensive one to JIT: building the Mooncake tape for the
+        # HMM forward pass dominates the first Mooncake fit in a fresh session.
+        run_hmm_inference(copy(test_mat), "nuts", 2, 0.8, 1; ad_name="mooncake")
     end
 
     if prev_chains === nothing

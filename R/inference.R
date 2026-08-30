@@ -1,16 +1,31 @@
 #' Run HMM inference on diagnostic test data
 #'
 #' @param test_mat Test matrix (individuals x tests)
-#' @param method Inference method: "map", "mle", or "nuts"
+#' @param method Inference method: "map", "mle", "nuts", or "hmc". "hmc" is a
+#'   fast path for the five sql-e2e bundle variants only: fixed trajectory-length
+#'   HMC under a dense mass matrix tuned offline for that exact variant, so no
+#'   adaptation is repeated at run time. rw1 cumsum makes a funnel a diagonal
+#'   metric cannot represent; dense steps at eps ~0.3 against ~0.047, roughly 8x
+#'   the post-warmup effective draws per second. The tuned constants are specific
+#'   to the cohort they were tuned on and only the parameter count is checked, so
+#'   different data samples badly rather than failing. Falls back to "nuts" when
+#'   no tuned entry matches.
 #' @param nuts_samples Number of NUTS samples (for method="nuts")
 #' @param traj_draws Trajectories sampled per badger for prevalence intervals; 0 skips them
 #' @param chain_cache Path to save the NUTS chain to, before post-processing
 #' @param reuse_chain Load the cached chain instead of sampling again
-#' @param ad AD backend for NUTS: "forwarddiff" (default) or "mooncake".
-#'   Mooncake is roughly 3x faster on the gradient but requires the caller to
-#'   have run `JuliaCall::julia_command("using Mooncake;")` first, because
-#'   DifferentiationInterface only wires up its Mooncake extension if Mooncake
-#'   is loaded before it prepares a gradient.
+#' @param ad AD backend for the sampling methods: "auto" (default),
+#'   "forwarddiff" or "mooncake".
+#'
+#'   "auto" means reverse mode (Mooncake) for "nuts" and "hmc", and forward
+#'   mode for "map" and "mle". At this parameter count (58-70) reverse mode is
+#'   ~3x faster per gradient, and Mooncake is a full dependency of the engine
+#'   whose tape is built during precompilation, so choosing it costs nothing at
+#'   run time. Forward mode stays the default for the optimisers, where the
+#'   problem is small enough that it wins.
+#'   The caller no longer has to load Mooncake: the engine depends on it and
+#'   loads it at module load, which is what lets its gradient tape be built
+#'   during precompilation rather than on the first fit of every session.
 #' @param target_acc Target acceptance rate for NUTS
 #' @param year_process Year-effect process: `"rw1"` (default), `"iid"`,
 #'   `"rw2"`, `"ar1"`, `"shrunk"` or `"none"`.
@@ -33,7 +48,7 @@
 #' @param seed Random seed
 #' @return List with individual infection probabilities and prevalence over time
 #' @export
-hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
+hmm_inference <- function(test_mat, method = c("map", "mle", "nuts", "hmc"),
                          nuts_samples = 1000,
                          target_acc = 0.65,
                          year_process = c("rw1", "iid", "rw2", "ar1", "shrunk", "none"),
@@ -47,7 +62,7 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
                          traj_draws = 500,
                          chain_cache = NULL,
                          reuse_chain = FALSE,
-                         ad = c("forwarddiff", "mooncake"),
+                         ad = c("auto", "forwarddiff", "mooncake"),
                          hazard_mean = -3.0,
                          hazard_sd = 1.5,
                          penalty = NULL,
@@ -171,7 +186,13 @@ hmm_inference <- function(test_mat, method = c("map", "mle", "nuts"),
   JuliaCall::julia_assign("j_repeat_captures", repeat_captures)
   JuliaCall::julia_assign("j_traj_draws", as.integer(traj_draws))
   JuliaCall::julia_assign("j_reuse_chain", as.logical(reuse_chain))
-  JuliaCall::julia_assign("j_ad", match.arg(ad))
+  # "auto": reverse mode where the gradient count is the cost (the samplers),
+  # forward mode where it is not (the optimisers).
+  ad <- match.arg(ad)
+  if (ad == "auto") {
+    ad <- if (method %in% c("nuts", "hmc")) "mooncake" else "forwarddiff"
+  }
+  JuliaCall::julia_assign("j_ad", ad)
   JuliaCall::julia_assign("j_chain_cache",
                           if (is.null(chain_cache)) "" else normalizePath(chain_cache, mustWork = FALSE))
   
